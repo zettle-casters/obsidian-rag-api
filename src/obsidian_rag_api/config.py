@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
 
+    # Путь для сохранения метаданных vault'ов
+    vaults_metadata_path: str = ".vaults_metadata.json"
+
     model_config = {"env_file": ".env"}
 
 

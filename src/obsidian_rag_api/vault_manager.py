@@ -3,8 +3,10 @@
 import uuid
 import tempfile
 import zipfile
+import json
 from pathlib import Path
 from typing import Optional, Callable, AsyncGenerator
+from datetime import datetime
 
 from obsidian_retriever.manager import KnowledgeBaseManager
 from obsidian_retriever.schemas import NoteRecord
@@ -14,6 +16,9 @@ from .config import settings
 
 # Global registry: vault_id -> KnowledgeBaseManager
 _vault_managers: dict[str, KnowledgeBaseManager] = {}
+
+# Vault metadata storage
+_vault_metadata: dict[str, dict] = {}
 
 
 def create_vault_manager(vault_id: str) -> KnowledgeBaseManager:
@@ -70,6 +75,17 @@ async def upload_vault(
         exclude_paths=exclude_paths,
         max_chunk_size=chunk_size,
     )
+
+    # Save metadata
+    _vault_metadata[vault_id] = {
+        "vault_id": vault_id,
+        "created_at": datetime.now().isoformat(),
+        "name": Path(zip_file_path).stem,
+        "include_paths": include_paths,
+        "exclude_paths": exclude_paths,
+        "chunk_size": chunk_size,
+    }
+    _save_metadata()
 
     return vault_id
 
@@ -311,6 +327,18 @@ async def upload_vault_with_progress(
                 "message": "Link building complete",
             }
 
+        # Save metadata
+        _vault_metadata[vault_id] = {
+            "vault_id": vault_id,
+            "created_at": datetime.now().isoformat(),
+            "name": Path(zip_file_path).stem,
+            "include_paths": include_paths,
+            "exclude_paths": exclude_paths,
+            "chunk_size": chunk_size,
+            "notes_count": total_notes,
+        }
+        _save_metadata()
+
         # Final success message
         yield {
             "stage": "complete",
@@ -329,14 +357,66 @@ async def upload_vault_with_progress(
         }
 
 
-def list_vaults() -> list[str]:
-    """List all registered vault IDs."""
-    return list(_vault_managers.keys())
+def list_vaults() -> list[dict]:
+    """List all registered vaults with metadata."""
+    vaults = []
+    for vault_id in _vault_managers.keys():
+        metadata = _vault_metadata.get(vault_id, {})
+        vaults.append({
+            "vault_id": vault_id,
+            "name": metadata.get("name", "Unknown"),
+            "created_at": metadata.get("created_at"),
+            "notes_count": metadata.get("notes_count", 0),
+        })
+    return vaults
 
 
 def delete_vault(vault_id: str) -> bool:
     """Remove a vault from the registry."""
     if vault_id in _vault_managers:
         del _vault_managers[vault_id]
+        if vault_id in _vault_metadata:
+            del _vault_metadata[vault_id]
+        _save_metadata()
         return True
     return False
+
+
+def _save_metadata() -> None:
+    """Save vault metadata to disk."""
+    metadata_path = Path(settings.vaults_metadata_path)
+    try:
+        with open(metadata_path, 'w', encoding='utf-8') as f:
+            json.dump(_vault_metadata, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"Failed to save vault metadata: {e}")
+
+
+def _load_metadata() -> None:
+    """Load vault metadata from disk."""
+    metadata_path = Path(settings.vaults_metadata_path)
+    if not metadata_path.exists():
+        return
+
+    try:
+        with open(metadata_path, 'r', encoding='utf-8') as f:
+            loaded = json.load(f)
+            _vault_metadata.update(loaded)
+    except Exception as e:
+        print(f"Failed to load vault metadata: {e}")
+
+
+def restore_vaults_from_metadata() -> None:
+    """
+    Restore vault managers from saved metadata.
+    Called on application startup.
+    """
+    _load_metadata()
+
+    for vault_id, metadata in _vault_metadata.items():
+        try:
+            # Recreate vault manager
+            manager = create_vault_manager(vault_id)
+            print(f"Restored vault {vault_id}: {metadata.get('name', 'Unknown')} ({metadata.get('notes_count', 0)} notes)")
+        except Exception as e:
+            print(f"Failed to restore vault {vault_id}: {e}")

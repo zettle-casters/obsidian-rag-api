@@ -11,13 +11,15 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .agent import run_agent_with_vault, get_agent_for_vault
-from .vault_manager import upload_vault, upload_vault_with_progress, get_vault_manager, list_vaults
+from .vault_manager import upload_vault, upload_vault_with_progress, get_vault_manager, list_vaults, restore_vaults_from_metadata
 from .config import settings
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan."""
+    # Restore vaults from metadata on startup
+    restore_vaults_from_metadata()
     yield
 
 
