@@ -65,10 +65,10 @@ async def health():
 
 @app.post("/upload", response_model=UploadResponse)
 async def upload_endpoint(
-    file: UploadFile = File(...),
-    include_paths: str = Form(""),
-    exclude_paths: str = Form(""),
-    chunk_size: int = Form(500),
+        file: UploadFile = File(...),
+        include_paths: str = Form(""),
+        exclude_paths: str = Form(""),
+        chunk_size: int = Form(500),
 ):
     """
     Upload and initialize a vault from a ZIP file.
@@ -123,10 +123,10 @@ async def upload_endpoint(
 
 @app.post("/upload/stream")
 async def upload_stream_endpoint(
-    file: UploadFile = File(...),
-    include_paths: str = Form(""),
-    exclude_paths: str = Form(""),
-    chunk_size: int = Form(500),
+        file: UploadFile = File(...),
+        include_paths: str = Form(""),
+        exclude_paths: str = Form(""),
+        chunk_size: int = Form(500),
 ):
     """
     Upload and initialize a vault from a ZIP file with streaming progress updates.
@@ -162,10 +162,10 @@ async def upload_stream_endpoint(
 
             # Stream progress updates
             async for progress_update in upload_vault_with_progress(
-                zip_file_path=tmp_path,
-                include_paths=include_list,
-                exclude_paths=exclude_list,
-                chunk_size=chunk_size,
+                    zip_file_path=tmp_path,
+                    include_paths=include_list,
+                    exclude_paths=exclude_list,
+                    chunk_size=chunk_size,
             ):
                 yield f"data: {json.dumps(progress_update, ensure_ascii=False)}\n\n"
 
@@ -266,22 +266,88 @@ async def agent_stream_endpoint(request: AgentRequest):
 
         config = {"configurable": {"thread_id": thread_id}}
 
-        # Stream through the graph
-        async for event in agent.astream(initial_state, config, stream_mode="updates"):
+        async for event in stream_events(agent, initial_state, config, request):
+            yield event
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+        }
+    )
+
+
+async def stream_events(agent, initial_state, config, request):
+    """Правильная обработка multi-mode стриминга LangGraph."""
+    thread_id = config["configurable"].get("thread_id")
+    vault_id = request.vault_id
+
+    yield f"data: {json.dumps({'status': 'started', 'thread_id': thread_id})}\n\n"
+
+    async for event in agent.astream(initial_state, config, stream_mode=["updates", "messages"]):
+        if isinstance(event, tuple) and len(event) == 2:
+            token_obj, metadata = event
+            content = extract_token_content(token_obj)
+
+            if content:
+                yield f"data: {json.dumps({
+                    'type': 'token',
+                    'node': metadata.get('langgraph_node', 'unknown'),
+                    'content': content,
+                    'thread_id': thread_id
+                }, ensure_ascii=False)}\n\n"
+
+        elif isinstance(event, dict):
             for node_name, node_output in event.items():
-                # Serialize the event (handle sets)
-                serializable_output = {}
-                for k, v in node_output.items():
-                    if isinstance(v, set):
-                        serializable_output[k] = list(v)
-                    else:
-                        serializable_output[k] = v
+                serializable_output = serialize_output(node_output)
+                yield f"data: {json.dumps({
+                    'type': 'update',
+                    'node': node_name,
+                    'output': serializable_output,
+                    'thread_id': thread_id
+                }, ensure_ascii=False)}\n\n"
 
-                yield f"data: {json.dumps({'node': node_name, 'output': serializable_output}, ensure_ascii=False)}\n\n"
+    yield f"data: {json.dumps({'status': 'complete', 'thread_id': thread_id, 'vault_id': vault_id})}\n\n"
 
-        yield f"data: {json.dumps({'status': 'complete', 'thread_id': thread_id, 'vault_id': request.vault_id}, ensure_ascii=False)}\n\n"
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+def extract_token_content(token_obj):
+    """Извлекает чистый текст из любого токена LangChain."""
+    if hasattr(token_obj, 'content') and token_obj.content:
+        return token_obj.content
+    if hasattr(token_obj, 'text') and token_obj.text:
+        return token_obj.text
+    if hasattr(token_obj, 'message') and token_obj.message.content:
+        return token_obj.message.content
+
+    token_str = str(token_obj)
+    if "content='" in token_str:
+        start = token_str.find("content='") + 9
+        end = token_str.find("'", start)
+        return token_str[start:end]
+
+    return ""
+
+def serialize_output(output):
+    """Безопасная сериализация вывода ноды."""
+    if not isinstance(output, dict):
+        return str(output)
+
+    serializable = {}
+    for key, value in output.items():
+        if isinstance(value, set):
+            serializable[key] = list(value)
+        elif value is None:
+            serializable[key] = None
+        elif isinstance(value, (str, int, float, bool)):
+            serializable[key] = value
+        elif isinstance(value, dict):
+            serializable[key] = serialize_output(value)
+        else:
+            serializable[key] = str(value)
+    return serializable
 
 
 def main():

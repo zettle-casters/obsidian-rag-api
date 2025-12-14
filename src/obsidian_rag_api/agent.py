@@ -4,6 +4,7 @@ import asyncio
 import operator
 from typing import Annotated, TypedDict
 
+from langgraph.config import get_stream_writer
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -55,12 +56,17 @@ async def reformulate_node(state: AgentState) -> dict:
     """Reformulate the user query for better search."""
     original = state["original_query"]
 
-    # Get conversation history for context-aware reformulation
-    history = state.get("messages", [])
-    reformulated = await reformulate_query(original, history)
+    writer = get_stream_writer()
 
-    # Add user message to history
+    history = state.get("messages", [])
+
+    writer("🔄 Начинаю переформулировку запроса...")
+
+    reformulated = await reformulate_query(original, history, writer)
+
     new_messages = [{"role": "user", "content": original}]
+
+    writer("✅ Переформулировка завершена")
 
     return {
         "reformulated_query": reformulated,

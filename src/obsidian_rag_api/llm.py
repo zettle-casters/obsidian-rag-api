@@ -9,7 +9,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from .config import settings
 
 
-def get_llm(cheap: bool = False) -> ChatOpenAI:
+def get_llm(cheap: bool = False, streaming: bool=False) -> ChatOpenAI:
     """Get LLM instance."""
     model = settings.openai_cheap_model if cheap else settings.openai_model
     return ChatOpenAI(
@@ -17,12 +17,13 @@ def get_llm(cheap: bool = False) -> ChatOpenAI:
         base_url=settings.openai_base_url,
         api_key=settings.openai_api_key,
         temperature=0,
+        streaming=streaming,
     )
 
 
 async def check_relevance(query: str, note_content: str, note_title: str) -> bool:
     """Check if a note is relevant to the query using a cheap LLM."""
-    llm = get_llm(cheap=True)
+    llm = get_llm(cheap=True, streaming=False)
 
     system_prompt = """You are a relevance checker. Your task is to determine if a note contains information relevant to answering a user's question.
 
@@ -60,10 +61,9 @@ async def check_relevance_batch(
     return await asyncio.gather(*tasks)
 
 
-async def reformulate_query(original_query: str, history: list[dict] = None) -> str:
+async def reformulate_query(original_query: str, history: list[dict] = None, writer=None) -> str:
     """Reformulate user query for better search results."""
-    llm = get_llm(cheap=True)
-
+    llm = get_llm(cheap=True, streaming=True)
     history = history or []
 
     system_prompt = """You are a query reformulator. Your task is to reformulate user questions to make them better for semantic search.
@@ -76,7 +76,6 @@ Rules:
 5. If there is conversation history, use it for context to understand what the user is asking about
 6. Return ONLY the reformulated query, nothing else"""
 
-    # Build context from history
     history_text = ""
     if history:
         history_text = "\n\nConversation history:\n"
@@ -98,7 +97,7 @@ Rules:
 
 async def generate_answer(query: str, context: list[dict[str, Any]], history: list[dict] = None) -> str:
     """Generate final answer based on gathered context."""
-    llm = get_llm(cheap=False)
+    llm = get_llm(cheap=False, streaming=True)
 
     history = history or []
 
@@ -151,7 +150,7 @@ async def should_extend_context(
     if not current_context:
         return True
 
-    llm = get_llm(cheap=True)
+    llm = get_llm(cheap=True, streaming=False)
 
     context_summary = "\n".join(
         f"- {note.get('title', 'Untitled')}: {note.get('content', '')[:500]}"
