@@ -7,6 +7,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -28,6 +29,15 @@ app = FastAPI(
     description="RAG agent for querying Obsidian knowledge base with multi-vault support",
     version="0.2.0",
     lifespan=lifespan,
+)
+
+# Add CORS middleware for web UI
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, specify exact origins
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -184,7 +194,15 @@ async def upload_stream_endpoint(
             if tmp_path and Path(tmp_path).exists():
                 Path(tmp_path).unlink()
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+        }
+    )
 
 
 @app.get("/vaults")

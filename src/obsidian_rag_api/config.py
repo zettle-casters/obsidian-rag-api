@@ -6,9 +6,19 @@ from pydantic_settings import BaseSettings
 
 load_dotenv()
 class Settings(BaseSettings):
-    neo4j_url: str = "bolt://neo4j:test1234@localhost:7687"
+    # Neo4j connection - can be set via NEO4J_URL or constructed from NEO4J_URI/USER/PASSWORD
+    neo4j_uri: str = "bolt://neo4j:7687"
+    neo4j_user: str = "neo4j"
+    neo4j_password: str = "test1234"
 
-    qdrant_host: str = "localhost"
+    @property
+    def neo4j_url(self) -> str:
+        """Construct Neo4j URL from URI and credentials."""
+        # Remove bolt:// prefix if present
+        uri = self.neo4j_uri.replace("bolt://", "")
+        return f"bolt://{self.neo4j_user}:{self.neo4j_password}@{uri}"
+
+    qdrant_host: str = "qdrant"
     qdrant_port: int = 6333
     qdrant_prefer_grpc: bool = False
 
@@ -26,7 +36,7 @@ class Settings(BaseSettings):
     port: int = 8000
 
     # Путь для сохранения метаданных vault'ов
-    vaults_metadata_path: str = ".vaults_metadata.json"
+    vaults_metadata_path: str = "/app/data/.vaults_metadata.json"
 
     model_config = {"env_file": ".env"}
 

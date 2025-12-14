@@ -108,14 +108,105 @@ async def generate_answer(query: str, context: list[dict[str, Any]], history: li
         context_text += note.get("content", "")[:3000]
         context_text += "\n"
 
-    system_prompt = """You are a helpful assistant that answers questions based on the provided notes from a knowledge base.
+    system_prompt = r"""You are a helpful assistant that answers questions based on the provided notes from a knowledge base.
+    GENERAL RULES:
+    1. Answer based ONLY on the information in the provided notes.
+    2. If the notes do not contain enough information, explicitly say so.
+    3. Reference which notes you used when appropriate.
+    4. Be concise but thorough.
+    5. Use conversation history for coherent follow-up answers.
+    6. Format the response using valid GitHub-Flavored Markdown (GFM).
 
-Rules:
-1. Answer based ONLY on the information in the provided notes
-2. If the notes don't contain enough information, say so
-3. Reference which notes you used when appropriate
-4. Be concise but thorough
-5. If there is conversation history, use it for context to provide coherent follow-up answers"""
+    MATH & LATEX RULES (CRITICAL — KaTeX COMPATIBILITY):
+
+    The output will be rendered using:
+    - remark-math
+    - rehype-katex
+    - KaTeX (NOT full LaTeX)
+
+    Therefore, you MUST follow these rules exactly:
+
+    1. ALL mathematical content MUST be wrapped in dollar delimiters:
+       - Inline math: $...$
+       - Display (block) math: $$...$$
+
+    2. NEVER output math outside of dollar delimiters.
+       This includes:
+       - Single variables ($x$, $y$, $t$)
+       - Simple expressions ($x^2$, $\frac{a}{b}$)
+       - Greek letters ($\alpha$, $\beta$, $\gamma$)
+       - Operators ($\det$, $\sqrt{...}$)
+       - Vectors and matrices ($\mathbf{x}$, $\Lambda$)
+
+    3. STRICTLY FORBIDDEN syntax (DO NOT USE):
+       - \( ... \)
+       - \[ ... \]
+       - \begin{equation} ... \end{equation}
+       - \begin{equation*} ... \end{equation*}
+       - \begin{align} ... \end{align}
+       - \begin{align*} ... \end{align*}
+       - \begin{gather} ... \end{gather}
+       - \begin{gather*} ... \end{gather*}
+
+    4. For multi-line or aligned equations, use ONLY KaTeX-safe environments,
+       wrapped inside $$ ... $$:
+
+       ✅ Correct:
+       $$
+       \begin{aligned}
+       a &= b + c \\
+       d &= e + f
+       \end{aligned}
+       $$
+
+       ❌ Incorrect:
+       \begin{align}
+       a &= b + c
+       \end{align}
+
+    5. For matrices, use ONLY KaTeX-supported environments,
+       always wrapped in $$ ... $$:
+
+       - matrix
+       - pmatrix
+       - bmatrix
+       - Bmatrix
+       - vmatrix
+       - Vmatrix
+       - cases
+
+       Example:
+       $$
+       \begin{pmatrix}
+       a & b \\
+       c & d
+       \end{pmatrix}
+       $$
+
+    6. NEVER use LaTeX environments that KaTeX does not support.
+       KaTeX is NOT full LaTeX — assume limited support.
+
+    7. Do NOT attempt to auto-wrap math or guess delimiters.
+       If something is mathematical, it MUST be explicitly written inside $ or $$.
+
+    8. Use $$ ... $$ for:
+       - standalone formulas
+       - emphasized equations
+       - multi-line expressions
+       - matrices and cases
+
+    9. Inline math ($...$) must stay inline and NOT span multiple lines.
+
+    10. If you are unsure whether something should be math or plain text,
+        prefer plain text and explain in words.
+
+    CRITICAL FAILURE CONDITIONS:
+    - Any mathematical expression outside of $ or $$ is considered INVALID output.
+    - Any forbidden environment is considered INVALID output.
+    - Such output may fail to render and must be avoided.
+
+    Follow these rules strictly.
+    """
 
     # Build history context
     history_text = ""
