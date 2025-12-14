@@ -256,6 +256,7 @@ async def agent_stream_endpoint(request: AgentRequest):
         initial_state = {
             "original_query": request.query,
             "vault_id": request.vault_id,
+            "messages": [],
             "reformulated_query": "",
             "search_results": [],
             "knowledge_base": [],
@@ -283,30 +284,34 @@ async def agent_stream_endpoint(request: AgentRequest):
 
 
 async def stream_events(agent, initial_state, config, request):
-    """Правильная обработка multi-mode стриминга LangGraph."""
+    """Stream LangGraph agent events with proper handling."""
     thread_id = config["configurable"].get("thread_id")
     vault_id = request.vault_id
 
     yield f"data: {json.dumps({'status': 'started', 'thread_id': thread_id})}\n\n"
 
-    async for event in agent.astream(initial_state, config, stream_mode=["updates", "messages"]):
-        if isinstance(event, tuple) and len(event) == 2:
-            token_obj, metadata = event
-            content = extract_token_content(token_obj)
+    async for chunk in agent.astream_events(initial_state, config, version="v2"):
+        kind = chunk.get("event")
 
-            if content:
+        # Стриминг токенов от LLM
+        if kind == "on_chat_model_stream":
+            content = chunk.get("data", {}).get("chunk", {})
+            if hasattr(content, "content") and content.content:
                 yield f"data: {json.dumps({
                     'type': 'token',
-                    'node': metadata.get('langgraph_node', 'unknown'),
-                    'content': content,
+                    'content': content.content,
                     'thread_id': thread_id
                 }, ensure_ascii=False)}\n\n"
 
-        elif isinstance(event, dict):
-            for node_name, node_output in event.items():
-                serializable_output = serialize_output(node_output)
+        # Обновления состояния нод
+        elif kind == "on_chain_end":
+            metadata = chunk.get("metadata", {})
+            node_name = metadata.get("langgraph_node")
+            if node_name:
+                output = chunk.get("data", {}).get("output", {})
+                serializable_output = serialize_output(output)
                 yield f"data: {json.dumps({
-                    'type': 'update',
+                    'type': 'node_complete',
                     'node': node_name,
                     'output': serializable_output,
                     'thread_id': thread_id
