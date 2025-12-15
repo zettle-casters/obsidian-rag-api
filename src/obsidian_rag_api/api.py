@@ -136,6 +136,7 @@ async def upload_endpoint(
 @app.post("/upload/stream")
 async def upload_stream_endpoint(
         file: UploadFile = File(...),
+        vault_name: str = Form(""),
         include_paths: str = Form(""),
         exclude_paths: str = Form(""),
         chunk_size: int = Form(500),
@@ -145,6 +146,7 @@ async def upload_stream_endpoint(
 
     Args:
         file: ZIP file containing the Obsidian vault
+        vault_name: Custom name for the vault (optional, defaults to filename)
         include_paths: Comma-separated list of paths to include (optional)
         exclude_paths: Comma-separated list of paths to exclude (optional)
         chunk_size: Maximum chunk size in characters (default: 500)
@@ -172,9 +174,13 @@ async def upload_stream_endpoint(
                 tmp_file.write(content)
                 tmp_path = tmp_file.name
 
+            # Use custom vault name or fallback to filename without .zip
+            final_vault_name = vault_name.strip() if vault_name.strip() else file.filename.replace(".zip", "")
+
             # Stream progress updates
             async for progress_update in upload_vault_with_progress(
                     zip_file_path=tmp_path,
+                    vault_name=final_vault_name,
                     include_paths=include_list,
                     exclude_paths=exclude_list,
                     chunk_size=chunk_size,

@@ -92,12 +92,20 @@ async def upload_vault(
 
 async def upload_vault_with_progress(
     zip_file_path: str,
+    vault_name: str = None,
     include_paths: list[str] = None,
     exclude_paths: list[str] = None,
     chunk_size: int = 500,
 ) -> AsyncGenerator[dict, None]:
     """
     Upload and initialize a vault from a ZIP file with progress updates.
+
+    Args:
+        zip_file_path: Path to the ZIP file
+        vault_name: Custom name for the vault (optional, defaults to filename)
+        include_paths: List of paths to include
+        exclude_paths: List of paths to exclude
+        chunk_size: Maximum chunk size in characters
 
     Yields progress updates as dict with:
         - stage: str - current stage name
@@ -328,10 +336,13 @@ async def upload_vault_with_progress(
             }
 
         # Save metadata
+        # Use provided vault_name or fallback to filename without .zip
+        final_name = vault_name if vault_name else Path(zip_file_path).stem
+
         _vault_metadata[vault_id] = {
             "vault_id": vault_id,
             "created_at": datetime.now().isoformat(),
-            "name": Path(zip_file_path).stem,
+            "name": final_name,
             "include_paths": include_paths,
             "exclude_paths": exclude_paths,
             "chunk_size": chunk_size,
