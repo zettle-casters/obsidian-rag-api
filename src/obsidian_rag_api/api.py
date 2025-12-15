@@ -327,6 +327,17 @@ async def stream_events(agent, initial_state, config, request):
                     'thread_id': thread_id
                 }, ensure_ascii=False)}\n\n"
 
+        # Начало работы ноды
+        elif kind == "on_chain_start":
+            metadata = chunk.get("metadata", {})
+            node_name = metadata.get("langgraph_node")
+            if node_name:
+                yield f"data: {json.dumps({
+                    'type': 'node_start',
+                    'node': node_name,
+                    'thread_id': thread_id
+                }, ensure_ascii=False)}\n\n"
+
         # Обновления состояния нод
         elif kind == "on_chain_end":
             metadata = chunk.get("metadata", {})
