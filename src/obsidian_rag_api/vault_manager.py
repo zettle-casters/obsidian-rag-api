@@ -29,6 +29,8 @@ def create_vault_manager(vault_id: str) -> KnowledgeBaseManager:
         port=settings.qdrant_port,
         prefer_grpc=settings.qdrant_prefer_grpc,
         model_name=settings.embeddings_model,
+        api_key=settings.openai_api_key,
+        base_url=settings.openai_base_url,
     )
     _vault_managers[vault_id] = manager
     return manager
