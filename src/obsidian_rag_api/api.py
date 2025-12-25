@@ -3,6 +3,8 @@
 import uuid
 import tempfile
 import json
+import asyncio
+import subprocess
 from pathlib import Path
 from contextlib import asynccontextmanager
 
@@ -390,6 +392,294 @@ def serialize_output(output):
         else:
             serializable[key] = str(value)
     return serializable
+
+
+def find_project_root() -> Path:
+    """
+    Find the project root by searching for the workspace root.
+
+    Returns:
+        Path to the project root
+    """
+    current = Path(__file__).resolve()
+
+    # Search up the directory tree
+    for parent in [current] + list(current.parents):
+        # Check for .git directory (most reliable indicator)
+        if (parent / ".git").exists():
+            return parent
+        # Primary check: directory contains obsidian_rag_tests submodule
+        if (parent / "obsidian_rag_tests").exists():
+            return parent
+
+    # Fallback: go up 4 levels from current file
+    return Path(__file__).parent.parent.parent.parent
+
+
+@app.post("/tests/run")
+async def run_tests_endpoint():
+    """
+    Run all tests from the obsidian_rag_tests submodule with streaming progress.
+
+    Returns:
+        Server-Sent Events stream with detailed test execution progress for each test case
+    """
+    async def generate():
+        try:
+            # Import test modules
+            import sys
+            project_root = find_project_root()
+            tests_path = project_root / "obsidian_rag_tests"
+
+            if not tests_path.exists():
+                error_event = {
+                    "type": "error",
+                    "message": "obsidian_rag_tests submodule not found",
+                    "error": f"Path {tests_path} does not exist. Project root: {project_root}"
+                }
+                yield f"data: {json.dumps(error_event, ensure_ascii=False)}\n\n"
+                return
+
+            # Add tests path to sys.path
+            tests_src = str(tests_path / "src")
+            if tests_src not in sys.path:
+                sys.path.insert(0, tests_src)
+
+            # Import required modules
+            from obsidian_rag_api.llm import check_relevance, should_extend_context
+
+            # Notify start
+            yield f"data: {json.dumps({'type': 'suite_start', 'message': 'Начало выполнения тестов'}, ensure_ascii=False)}\n\n"
+
+            # ==== Test Suite 1: check_relevance ====
+            yield f"data: {json.dumps({'type': 'test_suite_start', 'suite': 'check_relevance', 'name': 'Проверка релевантности заметок'}, ensure_ascii=False)}\n\n"
+
+            check_relevance_path = tests_path / "src" / "obsidian_rag_tests" / "test_check_relevance"
+            cases_file = check_relevance_path / "test_cases.json"
+
+            with open(cases_file, 'r', encoding='utf-8') as f:
+                check_relevance_data = json.load(f)
+
+            check_relevance_cases = check_relevance_data.get("cases", [])
+            check_relevance_results = []
+
+            for i, case in enumerate(check_relevance_cases):
+                test_id = case.get("id")
+                query = case.get("query")
+                note = case["note"]
+                expected = case.get("expected_value")
+                complexity = case.get("complexity")
+
+                # Notify test start
+                yield f"data: {json.dumps({'type': 'test_start', 'suite': 'check_relevance', 'id': test_id, 'query': query[:50] + '...' if len(query) > 50 else query, 'complexity': complexity}, ensure_ascii=False)}\n\n"
+
+                # Run test
+                try:
+                    result = await check_relevance(query, note["content"], note["title"])
+                    passed = (bool(result) == bool(expected)) if expected is not None else None
+
+                    check_relevance_results.append({
+                        "id": test_id,
+                        "relevant": bool(result),
+                        "expected_value": expected,
+                        "complexity": complexity,
+                    })
+
+                    # Notify test complete
+                    yield f"data: {json.dumps({'type': 'test_complete', 'suite': 'check_relevance', 'id': test_id, 'result': bool(result), 'expected': expected, 'passed': passed, 'complexity': complexity}, ensure_ascii=False)}\n\n"
+
+                except Exception as e:
+                    yield f"data: {json.dumps({'type': 'test_error', 'suite': 'check_relevance', 'id': test_id, 'error': str(e)}, ensure_ascii=False)}\n\n"
+
+            # Save check_relevance results
+            results_file = check_relevance_path / "test_results.json"
+            with open(results_file, 'w', encoding='utf-8') as f:
+                json.dump({"results": check_relevance_results}, f, ensure_ascii=False, indent=2)
+
+            # Calculate stats for check_relevance
+            stats = {}
+            for case in check_relevance_results:
+                complexity = str(case.get("complexity"))
+                if complexity not in stats:
+                    stats[complexity] = {"total": 0, "passed": 0, "failed": 0, "unknown": 0}
+
+                stats[complexity]["total"] += 1
+                expected = case.get("expected_value")
+                if expected is None:
+                    stats[complexity]["unknown"] += 1
+                else:
+                    passed = bool(case.get("relevant")) == bool(expected)
+                    if passed:
+                        stats[complexity]["passed"] += 1
+                    else:
+                        stats[complexity]["failed"] += 1
+
+            # Save stats
+            stats_file = check_relevance_path / "test_stats.txt"
+            with open(stats_file, 'w', encoding='utf-8') as f:
+                for level, vals in stats.items():
+                    f.write(f"Complexity: {level}\n")
+                    f.write(f"  total: {vals['total']}\n")
+                    f.write(f"  passed: {vals['passed']}\n")
+                    f.write(f"  failed: {vals['failed']}\n")
+                    f.write(f"  unknown: {vals['unknown']}\n\n")
+
+            yield f"data: {json.dumps({'type': 'test_suite_complete', 'suite': 'check_relevance', 'stats': stats}, ensure_ascii=False)}\n\n"
+
+            # ==== Test Suite 2: should_extend_context ====
+            yield f"data: {json.dumps({'type': 'test_suite_start', 'suite': 'should_extend_context', 'name': 'Проверка необходимости расширения контекста'}, ensure_ascii=False)}\n\n"
+
+            extend_context_path = tests_path / "src" / "obsidian_rag_tests" / "test_should_extend_context"
+            cases_file = extend_context_path / "test_cases.json"
+
+            with open(cases_file, 'r', encoding='utf-8') as f:
+                extend_context_data = json.load(f)
+
+            extend_context_cases = extend_context_data.get("cases", [])
+            extend_context_results = []
+
+            for i, case in enumerate(extend_context_cases):
+                test_id = case.get("id")
+                query = case.get("query")
+                context = case.get("context", [])
+                expected = case.get("expected_value")
+                complexity = case.get("complexity")
+
+                # Notify test start
+                yield f"data: {json.dumps({'type': 'test_start', 'suite': 'should_extend_context', 'id': test_id, 'query': query[:50] + '...' if len(query) > 50 else query, 'complexity': complexity}, ensure_ascii=False)}\n\n"
+
+                # Run test
+                try:
+                    result = await should_extend_context(query, context)
+                    passed = (bool(result) == bool(expected)) if expected is not None else None
+
+                    extend_context_results.append({
+                        "id": test_id,
+                        "needs_extension": bool(result),
+                        "expected_value": expected,
+                        "complexity": complexity,
+                    })
+
+                    # Notify test complete
+                    yield f"data: {json.dumps({'type': 'test_complete', 'suite': 'should_extend_context', 'id': test_id, 'result': bool(result), 'expected': expected, 'passed': passed, 'complexity': complexity}, ensure_ascii=False)}\n\n"
+
+                except Exception as e:
+                    yield f"data: {json.dumps({'type': 'test_error', 'suite': 'should_extend_context', 'id': test_id, 'error': str(e)}, ensure_ascii=False)}\n\n"
+
+            # Save should_extend_context results
+            results_file = extend_context_path / "test_results.json"
+            with open(results_file, 'w', encoding='utf-8') as f:
+                json.dump({"results": extend_context_results}, f, ensure_ascii=False, indent=2)
+
+            # Calculate stats for should_extend_context
+            stats = {}
+            for case in extend_context_results:
+                complexity = str(case.get("complexity"))
+                if complexity not in stats:
+                    stats[complexity] = {"total": 0, "passed": 0, "failed": 0, "unknown": 0}
+
+                stats[complexity]["total"] += 1
+                expected = case.get("expected_value")
+                if expected is None:
+                    stats[complexity]["unknown"] += 1
+                else:
+                    passed = bool(case.get("needs_extension")) == bool(expected)
+                    if passed:
+                        stats[complexity]["passed"] += 1
+                    else:
+                        stats[complexity]["failed"] += 1
+
+            # Save stats
+            stats_file = extend_context_path / "test_stats.txt"
+            with open(stats_file, 'w', encoding='utf-8') as f:
+                for level, vals in stats.items():
+                    f.write(f"Complexity: {level}\n")
+                    f.write(f"  total: {vals['total']}\n")
+                    f.write(f"  passed: {vals['passed']}\n")
+                    f.write(f"  failed: {vals['failed']}\n")
+                    f.write(f"  unknown: {vals['unknown']}\n\n")
+
+            yield f"data: {json.dumps({'type': 'test_suite_complete', 'suite': 'should_extend_context', 'stats': stats}, ensure_ascii=False)}\n\n"
+
+            # Send final completion
+            yield f"data: {json.dumps({'type': 'suite_complete', 'message': 'Все тесты завершены'}, ensure_ascii=False)}\n\n"
+
+        except Exception as e:
+            error_event = {
+                "type": "error",
+                "message": f"Ошибка при запуске тестов: {str(e)}",
+                "error": str(e)
+            }
+            yield f"data: {json.dumps(error_event, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+        }
+    )
+
+
+@app.get("/tests/results")
+async def get_test_results():
+    """
+    Get the latest test results from both test suites.
+
+    Returns:
+        JSON with test results and statistics for both test suites
+    """
+    try:
+        # Find the project root
+        project_root = find_project_root()
+        tests_path = project_root / "obsidian_rag_tests"
+
+        if not tests_path.exists():
+            raise HTTPException(
+                status_code=404,
+                detail="obsidian_rag_tests submodule not found"
+            )
+
+        results = {}
+
+        # Read check_relevance results
+        check_relevance_results_path = tests_path / "src" / "obsidian_rag_tests" / "test_check_relevance" / "test_results.json"
+        check_relevance_stats_path = tests_path / "src" / "obsidian_rag_tests" / "test_check_relevance" / "test_stats.txt"
+
+        if check_relevance_results_path.exists():
+            with open(check_relevance_results_path, 'r', encoding='utf-8') as f:
+                results['check_relevance'] = json.load(f)
+
+        if check_relevance_stats_path.exists():
+            with open(check_relevance_stats_path, 'r', encoding='utf-8') as f:
+                results['check_relevance_stats'] = f.read()
+
+        # Read should_extend_context results
+        extend_context_results_path = tests_path / "src" / "obsidian_rag_tests" / "test_should_extend_context" / "test_results.json"
+        extend_context_stats_path = tests_path / "src" / "obsidian_rag_tests" / "test_should_extend_context" / "test_stats.txt"
+
+        if extend_context_results_path.exists():
+            with open(extend_context_results_path, 'r', encoding='utf-8') as f:
+                results['should_extend_context'] = json.load(f)
+
+        if extend_context_stats_path.exists():
+            with open(extend_context_stats_path, 'r', encoding='utf-8') as f:
+                results['should_extend_context_stats'] = f.read()
+
+        if not results:
+            raise HTTPException(
+                status_code=404,
+                detail="No test results found. Run tests first using /tests/run"
+            )
+
+        return results
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 def main():
