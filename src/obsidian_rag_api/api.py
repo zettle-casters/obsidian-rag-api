@@ -403,13 +403,16 @@ def find_project_root() -> Path:
     """
     current = Path(__file__).resolve()
 
-    # Search up the directory tree
+    # Prefer the workspace root that contains tests (avoid submodule .git files).
+    for parent in [current] + list(current.parents):
+        if (parent / "obsidian_rag_tests").exists():
+            return parent
+
+    # Search up the directory tree for a real git directory.
     for parent in [current] + list(current.parents):
         # Check for .git directory (most reliable indicator)
-        if (parent / ".git").exists():
-            return parent
-        # Primary check: directory contains obsidian_rag_tests submodule
-        if (parent / "obsidian_rag_tests").exists():
+        git_dir = parent / ".git"
+        if git_dir.exists() and git_dir.is_dir():
             return parent
 
     # Fallback: go up 4 levels from current file
