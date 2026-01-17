@@ -23,6 +23,14 @@ from .vault_manager import get_vault_manager
 mcp_server = Server("obsidian-rag")
 
 
+def _text(message: str) -> list[TextContent]:
+    return [TextContent(type="text", text=message)]
+
+
+def _json_text(payload: Any) -> list[TextContent]:
+    return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False, indent=2))]
+
+
 class ReadNoteInput(BaseModel):
     """Input schema for read_note tool."""
 
@@ -152,7 +160,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     """Handle tool calls."""
     user, error = _resolve_stdio_user()
     if error:
-        return [TextContent(type="text", text=error)]
+        return _text(error)
     return await call_tool_for_user(name, arguments, user)
 
 
@@ -165,29 +173,14 @@ async def call_tool_for_user(
 
     vault_id = arguments.get("vault_id")
     if not vault_id:
-        return [
-            TextContent(
-                type="text",
-                text="Error: vault_id is required.",
-            )
-        ]
+        return _text("Error: vault_id is required.")
 
     if not _vault_belongs_to_user(vault_id, user.id):
-        return [
-            TextContent(
-                type="text",
-                text=f"Error: Vault {vault_id} not found for current user.",
-            )
-        ]
+        return _text(f"Error: Vault {vault_id} not found for current user.")
 
     retriever = get_vault_manager(vault_id)
     if not retriever:
-        return [
-            TextContent(
-                type="text",
-                text=f"Error: Vault {vault_id} not found. Please upload a vault first.",
-            )
-        ]
+        return _text(f"Error: Vault {vault_id} not found. Please upload a vault first.")
 
     if name == "read_note":
         return await handle_read_note(retriever, arguments)
@@ -196,7 +189,7 @@ async def call_tool_for_user(
     elif name == "extend_context_using_nearest":
         return await handle_extend_context(retriever, arguments)
     else:
-        return [TextContent(type="text", text=f"Unknown tool: {name}")]
+        return _text(f"Unknown tool: {name}")
 
 
 def _resolve_stdio_user() -> tuple[User | None, str | None]:
@@ -252,12 +245,7 @@ async def handle_list_vaults(arguments: dict[str, Any], user_id: str) -> list[Te
         for vault in vaults
     ]
 
-    return [
-        TextContent(
-            type="text",
-            text=json.dumps(results, ensure_ascii=False, indent=2),
-        )
-    ]
+    return _json_text(results)
 
 
 async def handle_read_note(
@@ -268,7 +256,7 @@ async def handle_read_note(
 
     note = retriever.get_note(note_id)
     if note is None:
-        return [TextContent(type="text", text=f"Note not found: {note_id}")]
+        return _text(f"Note not found: {note_id}")
 
     # Get all chunks for this note
     chunks = []
@@ -287,7 +275,7 @@ async def handle_read_note(
         "full_text": "\n\n".join(c["text"] for c in chunks),
     }
 
-    return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+    return _json_text(result)
 
 
 async def handle_search(
@@ -321,11 +309,7 @@ async def handle_search(
             }
         )
 
-    return [
-        TextContent(
-            type="text", text=json.dumps(search_results, ensure_ascii=False, indent=2)
-        )
-    ]
+    return _json_text(search_results)
 
 
 async def handle_extend_context(
@@ -338,20 +322,14 @@ async def handle_extend_context(
 
     # Check max recursion depth
     if current_depth >= settings.max_recursion_depth:
-        return [
-            TextContent(
-                type="text",
-                text=json.dumps(
-                    {
-                        "status": "max_depth_reached",
-                        "note_id": note_id,
-                        "depth": current_depth,
-                        "relevant_notes": [],
-                    },
-                    ensure_ascii=False,
-                ),
-            )
-        ]
+        return _json_text(
+            {
+                "status": "max_depth_reached",
+                "note_id": note_id,
+                "depth": current_depth,
+                "relevant_notes": [],
+            }
+        )
 
     # Get linked notes (both incoming and outgoing)
     outgoing_links, incoming_links = retriever.get_note_neighbors(note_id)
@@ -363,19 +341,13 @@ async def handle_extend_context(
         linked_note_ids.add(link.from_note_id)
 
     if not linked_note_ids:
-        return [
-            TextContent(
-                type="text",
-                text=json.dumps(
-                    {
-                        "status": "no_linked_notes",
-                        "note_id": note_id,
-                        "relevant_notes": [],
-                    },
-                    ensure_ascii=False,
-                ),
-            )
-        ]
+        return _json_text(
+            {
+                "status": "no_linked_notes",
+                "note_id": note_id,
+                "relevant_notes": [],
+            }
+        )
 
     # For each linked note, check relevance using LLM
     from .llm import check_relevance_batch
@@ -429,7 +401,7 @@ async def handle_extend_context(
         "notes_to_extend_further": notes_to_extend if current_depth < settings.max_recursion_depth - 1 else [],
     }
 
-    return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+    return _json_text(result)
 
 
 def main():

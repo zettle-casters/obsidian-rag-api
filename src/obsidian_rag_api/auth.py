@@ -166,28 +166,26 @@ def create_session(user: User, db: Session) -> DbSession:
     return session
 
 
+def _get_active_session(token: str | None, db: Session) -> DbSession | None:
+    if not token:
+        return None
+    now = datetime.now(timezone.utc)
+    return (
+        db.query(DbSession)
+        .filter(DbSession.token == token, DbSession.expires_at > now)
+        .first()
+    )
+
+
 def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     token = request.cookies.get(settings.session_cookie_name)
-    if token:
-        now = datetime.now(timezone.utc)
-        session = (
-            db.query(DbSession)
-            .filter(DbSession.token == token, DbSession.expires_at > now)
-            .first()
-        )
-        if session:
-            return session.user
+    session = _get_active_session(token, db)
+    if session:
+        return session.user
     return ensure_demo_user(db)
 
 
 def get_optional_user(request: Request, db: Session) -> Optional[User]:
     token = request.cookies.get(settings.session_cookie_name)
-    if not token:
-        return None
-    now = datetime.now(timezone.utc)
-    session = (
-        db.query(DbSession)
-        .filter(DbSession.token == token, DbSession.expires_at > now)
-        .first()
-    )
+    session = _get_active_session(token, db)
     return session.user if session else None

@@ -136,6 +136,18 @@ def _serialize_user(user: User) -> dict:
     }
 
 
+def _parse_paths(paths: str) -> list[str]:
+    return [p.strip() for p in paths.split(",") if p.strip()]
+
+
+def _validate_zip_upload(file: UploadFile) -> None:
+    if not file.filename.endswith(".zip"):
+        raise HTTPException(
+            status_code=400,
+            detail="Only ZIP files are supported. Please upload a .zip file.",
+        )
+
+
 def _get_vault_or_404(db, user: User, vault_id: str) -> Vault:
     vault = (
         db.query(Vault)
@@ -245,15 +257,11 @@ async def upload_endpoint(
         vault_id: UUID identifier for the uploaded vault
     """
     # Validate file type
-    if not file.filename.endswith(".zip"):
-        raise HTTPException(
-            status_code=400,
-            detail="Only ZIP files are supported. Please upload a .zip file.",
-        )
+    _validate_zip_upload(file)
 
     # Parse include/exclude paths
-    include_list = [p.strip() for p in include_paths.split(",") if p.strip()]
-    exclude_list = [p.strip() for p in exclude_paths.split(",") if p.strip()]
+    include_list = _parse_paths(include_paths)
+    exclude_list = _parse_paths(exclude_paths)
 
     try:
         # Save uploaded file to temporary location
@@ -310,15 +318,11 @@ async def upload_stream_endpoint(
         Server-Sent Events stream with progress updates
     """
     # Validate file type
-    if not file.filename.endswith(".zip"):
-        raise HTTPException(
-            status_code=400,
-            detail="Only ZIP files are supported. Please upload a .zip file.",
-        )
+    _validate_zip_upload(file)
 
     # Parse include/exclude paths
-    include_list = [p.strip() for p in include_paths.split(",") if p.strip()]
-    exclude_list = [p.strip() for p in exclude_paths.split(",") if p.strip()]
+    include_list = _parse_paths(include_paths)
+    exclude_list = _parse_paths(exclude_paths)
 
     async def generate():
         tmp_path = None

@@ -53,23 +53,29 @@ def _extract_token(raw_request: Request) -> str | None:
     return auth_header.strip()
 
 
+def _mcp_error(request_id: int | str | None, code: int, message: str) -> MCPResponse:
+    return MCPResponse(id=request_id, error={"code": code, "message": message})
+
+
+def _require_user(raw_request: Request, request_id: int | str | None):
+    token = _extract_token(raw_request)
+    if not token:
+        return None, _mcp_error(request_id, 401, "Missing MCP token")
+    with SessionLocal() as db:
+        user = get_user_by_mcp_token(token, db)
+    if user is None:
+        return None, _mcp_error(request_id, 401, "Invalid MCP token")
+    return user, None
+
+
 @app.post("/mcp")
 async def handle_mcp(request: MCPRequest, raw_request: Request):
     """Handle MCP JSON-RPC requests over HTTP."""
     try:
         if request.method == "tools/list":
-            token = _extract_token(raw_request)
-            if not token:
-                return MCPResponse(
-                    id=request.id,
-                    error={"code": 401, "message": "Missing MCP token"},
-                )
-            with SessionLocal() as db:
-                if get_user_by_mcp_token(token, db) is None:
-                    return MCPResponse(
-                        id=request.id,
-                        error={"code": 401, "message": "Invalid MCP token"},
-                    )
+            _, error = _require_user(raw_request, request.id)
+            if error:
+                return error
             tools = await list_tools()
             return MCPResponse(
                 id=request.id,
@@ -86,19 +92,9 @@ async def handle_mcp(request: MCPRequest, raw_request: Request):
             )
 
         elif request.method == "tools/call":
-            token = _extract_token(raw_request)
-            if not token:
-                return MCPResponse(
-                    id=request.id,
-                    error={"code": 401, "message": "Missing MCP token"},
-                )
-            with SessionLocal() as db:
-                user = get_user_by_mcp_token(token, db)
-            if user is None:
-                return MCPResponse(
-                    id=request.id,
-                    error={"code": 401, "message": "Invalid MCP token"},
-                )
+            user, error = _require_user(raw_request, request.id)
+            if error:
+                return error
 
             params = request.params or {}
             name = params.get("name", "")
@@ -131,22 +127,10 @@ async def handle_mcp(request: MCPRequest, raw_request: Request):
             )
 
         else:
-            return MCPResponse(
-                id=request.id,
-                error={
-                    "code": -32601,
-                    "message": f"Method not found: {request.method}",
-                },
-            )
+            return _mcp_error(request.id, -32601, f"Method not found: {request.method}")
 
     except Exception as e:
-        return MCPResponse(
-            id=request.id,
-            error={
-                "code": -32603,
-                "message": str(e),
-            },
-        )
+        return _mcp_error(request.id, -32603, str(e))
 
 
 def main():
