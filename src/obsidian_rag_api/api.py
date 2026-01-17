@@ -7,6 +7,7 @@ import asyncio
 import subprocess
 from pathlib import Path
 from contextlib import asynccontextmanager
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,7 +17,9 @@ from pydantic import BaseModel
 from .agent import run_agent_with_vault, get_agent_for_vault
 from .auth import build_google_auth_redirect, create_session, ensure_demo_user, exchange_code_for_user, get_current_user
 from .db import get_db, init_db, SessionLocal
-from .models import Vault, Session as DbSession, User
+from obsidian_retriever.utils.hash import text_hash
+
+from .models import Vault, VaultFile, Session as DbSession, User
 from .vault_manager import (
     upload_vault,
     upload_vault_with_progress,
@@ -80,6 +83,25 @@ class UploadResponse(BaseModel):
     vault_id: str
     message: str
     status: str
+
+
+class SyncChange(BaseModel):
+    type: Literal["upsert", "delete", "rename"]
+    path: str | None = None
+    content: str | None = None
+    from_path: str | None = None
+    to_path: str | None = None
+
+
+class SyncRequest(BaseModel):
+    vault_id: str
+    changes: list[SyncChange]
+
+
+class SyncResponse(BaseModel):
+    applied: int
+    skipped: int
+    errors: list[str]
 
 
 @app.get("/health")
@@ -315,6 +337,105 @@ async def list_vaults_endpoint(
     """List all uploaded vaults."""
     vaults = list_vaults(db, user.id)
     return {"vaults": vaults, "count": len(vaults)}
+
+
+@app.post("/sync/push", response_model=SyncResponse)
+async def sync_push_endpoint(
+    request: SyncRequest,
+    db=Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    vault = _get_vault_or_404(db, user, request.vault_id)
+    manager = get_or_create_vault_manager(request.vault_id)
+
+    applied = 0
+    skipped = 0
+    errors: list[str] = []
+
+    for change in request.changes:
+        try:
+            if change.type == "upsert":
+                if not change.path or change.content is None:
+                    raise ValueError("Missing path/content for upsert")
+
+                content_hash = text_hash(change.content)
+                record = (
+                    db.query(VaultFile)
+                    .filter(VaultFile.vault_id == vault.id, VaultFile.path == change.path)
+                    .first()
+                )
+                if record and record.content_hash == content_hash:
+                    skipped += 1
+                    continue
+
+                manager.upsert_note_from_content(change.path, change.content, max_chunk_size=vault.chunk_size or 500)
+
+                if record:
+                    record.content_hash = content_hash
+                else:
+                    db.add(VaultFile(vault_id=vault.id, path=change.path, content_hash=content_hash))
+                    vault.notes_count = (vault.notes_count or 0) + 1
+
+                db.commit()
+                applied += 1
+
+            elif change.type == "delete":
+                if not change.path:
+                    raise ValueError("Missing path for delete")
+
+                record = (
+                    db.query(VaultFile)
+                    .filter(VaultFile.vault_id == vault.id, VaultFile.path == change.path)
+                    .first()
+                )
+
+                manager.delete_note_by_path(change.path)
+
+                if record:
+                    db.delete(record)
+                    vault.notes_count = max(0, (vault.notes_count or 0) - 1)
+
+                db.commit()
+                applied += 1
+
+            elif change.type == "rename":
+                if not change.from_path or not change.to_path or change.content is None:
+                    raise ValueError("Missing from_path/to_path/content for rename")
+
+                old_record = (
+                    db.query(VaultFile)
+                    .filter(VaultFile.vault_id == vault.id, VaultFile.path == change.from_path)
+                    .first()
+                )
+
+                manager.delete_note_by_path(change.from_path)
+
+                if old_record:
+                    db.delete(old_record)
+
+                content_hash = text_hash(change.content)
+                manager.upsert_note_from_content(change.to_path, change.content, max_chunk_size=vault.chunk_size or 500)
+
+                new_record = (
+                    db.query(VaultFile)
+                    .filter(VaultFile.vault_id == vault.id, VaultFile.path == change.to_path)
+                    .first()
+                )
+                if new_record:
+                    new_record.content_hash = content_hash
+                else:
+                    db.add(VaultFile(vault_id=vault.id, path=change.to_path, content_hash=content_hash))
+                    if not old_record:
+                        vault.notes_count = (vault.notes_count or 0) + 1
+
+                db.commit()
+                applied += 1
+
+        except Exception as exc:
+            db.rollback()
+            errors.append(f"{change.type}:{change.path or change.from_path}->{change.to_path}: {exc}")
+
+    return SyncResponse(applied=applied, skipped=skipped, errors=errors)
 
 
 @app.post("/agent", response_model=AgentResponse)

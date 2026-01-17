@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -61,3 +61,16 @@ class Vault(Base):
     notes_count: Mapped[int] = mapped_column(Integer, default=0)
 
     user: Mapped[User] = relationship(User)
+
+
+class VaultFile(Base):
+    __tablename__ = "vault_files"
+    __table_args__ = (UniqueConstraint("vault_id", "path", name="uq_vault_files"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid_str)
+    vault_id: Mapped[str] = mapped_column(String(36), ForeignKey("vaults.id"), index=True)
+    path: Mapped[str] = mapped_column(Text)
+    content_hash: Mapped[str] = mapped_column(String(64))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    vault: Mapped[Vault] = relationship(Vault)
