@@ -4,11 +4,13 @@ import asyncio
 import json
 from typing import Any
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from .server import mcp_server, list_tools, call_tool
+from .auth import get_user_by_mcp_token
+from .db import SessionLocal
+from .server import list_tools, call_tool_for_user
 
 
 app = FastAPI(
@@ -42,11 +44,32 @@ async def health():
     return {"status": "healthy", "server": "obsidian-rag-mcp"}
 
 
+def _extract_token(raw_request: Request) -> str | None:
+    auth_header = raw_request.headers.get("Authorization") or raw_request.headers.get("X-MCP-Token")
+    if not auth_header:
+        return None
+    if auth_header.lower().startswith("bearer "):
+        return auth_header[7:].strip()
+    return auth_header.strip()
+
+
 @app.post("/mcp")
-async def handle_mcp(request: MCPRequest):
+async def handle_mcp(request: MCPRequest, raw_request: Request):
     """Handle MCP JSON-RPC requests over HTTP."""
     try:
         if request.method == "tools/list":
+            token = _extract_token(raw_request)
+            if not token:
+                return MCPResponse(
+                    id=request.id,
+                    error={"code": 401, "message": "Missing MCP token"},
+                )
+            with SessionLocal() as db:
+                if get_user_by_mcp_token(token, db) is None:
+                    return MCPResponse(
+                        id=request.id,
+                        error={"code": 401, "message": "Invalid MCP token"},
+                    )
             tools = await list_tools()
             return MCPResponse(
                 id=request.id,
@@ -63,11 +86,25 @@ async def handle_mcp(request: MCPRequest):
             )
 
         elif request.method == "tools/call":
+            token = _extract_token(raw_request)
+            if not token:
+                return MCPResponse(
+                    id=request.id,
+                    error={"code": 401, "message": "Missing MCP token"},
+                )
+            with SessionLocal() as db:
+                user = get_user_by_mcp_token(token, db)
+            if user is None:
+                return MCPResponse(
+                    id=request.id,
+                    error={"code": 401, "message": "Invalid MCP token"},
+                )
+
             params = request.params or {}
             name = params.get("name", "")
             arguments = params.get("arguments", {})
 
-            result = await call_tool(name, arguments)
+            result = await call_tool_for_user(name, arguments, user)
 
             return MCPResponse(
                 id=request.id,

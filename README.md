@@ -211,6 +211,7 @@ MCP Server с stdio транспортом для интеграции с Claude
 
 | Tool | Описание | Параметры |
 |------|----------|-----------|
+| `list_vaults` | Возвращает список доступных vault'ов | `query` (опц.), `limit` (опц.) |
 | `read_note` | Читает заметку по ID | `vault_id`, `note_id` |
 | `search` | Семантический поиск | `vault_id`, `query`, `top_k` |
 | `extend_context_using_nearest` | Расширяет контекст | `vault_id`, `note_id`, `query` |
@@ -229,6 +230,8 @@ python main.py mcp
 ### 🌍 server_http.py
 
 MCP Server с HTTP транспортом (SSE) на порту 8001.
+
+**Авторизация MCP:** для HTTP используйте `Authorization: Bearer <MCP_TOKEN>`, для stdio задайте `MCP_AUTH_TOKEN` в окружении. Токен можно получить в личном кабинете веб‑интерфейса.
 
 #### Endpoints
 

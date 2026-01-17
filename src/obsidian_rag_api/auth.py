@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .db import get_db
-from .models import OAuthState, Session as DbSession, User
+from .models import McpToken, OAuthState, Session as DbSession, User
 
 
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -114,6 +114,46 @@ def ensure_demo_user(db: Session) -> User:
         db.add(user)
         db.commit()
     return user
+
+
+def _generate_mcp_token() -> str:
+    return f"mcp_{secrets.token_urlsafe(32)}"
+
+
+def get_or_create_mcp_token(user: User, db: Session) -> McpToken:
+    record = db.query(McpToken).filter(McpToken.user_id == user.id).first()
+    if record:
+        return record
+    record = McpToken(user_id=user.id, token=_generate_mcp_token())
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return record
+
+
+def rotate_mcp_token(user: User, db: Session) -> McpToken:
+    record = db.query(McpToken).filter(McpToken.user_id == user.id).first()
+    if record is None:
+        record = McpToken(user_id=user.id, token=_generate_mcp_token())
+        db.add(record)
+    else:
+        record.token = _generate_mcp_token()
+        record.created_at = datetime.utcnow()
+        record.last_used_at = None
+    db.commit()
+    db.refresh(record)
+    return record
+
+
+def get_user_by_mcp_token(token: str, db: Session) -> Optional[User]:
+    if not token:
+        return None
+    record = db.query(McpToken).filter(McpToken.token == token).first()
+    if record is None:
+        return None
+    record.last_used_at = datetime.utcnow()
+    db.commit()
+    return record.user
 
 
 def create_session(user: User, db: Session) -> DbSession:

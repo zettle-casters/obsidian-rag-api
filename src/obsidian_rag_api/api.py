@@ -15,7 +15,15 @@ from fastapi.responses import StreamingResponse, RedirectResponse, JSONResponse
 from pydantic import BaseModel
 
 from .agent import run_agent_with_vault, get_agent_for_vault
-from .auth import build_google_auth_redirect, create_session, ensure_demo_user, exchange_code_for_user, get_current_user
+from .auth import (
+    build_google_auth_redirect,
+    create_session,
+    ensure_demo_user,
+    exchange_code_for_user,
+    get_current_user,
+    get_or_create_mcp_token,
+    rotate_mcp_token,
+)
 from .db import get_db, init_db, SessionLocal
 from obsidian_retriever.utils.hash import text_hash
 
@@ -83,6 +91,14 @@ class UploadResponse(BaseModel):
     vault_id: str
     message: str
     status: str
+
+
+class McpTokenResponse(BaseModel):
+    """Response model for MCP token."""
+
+    token: str
+    created_at: str
+    last_used_at: str | None = None
 
 
 class SyncChange(BaseModel):
@@ -180,6 +196,30 @@ async def logout(request: Request, db=Depends(get_db)):
     response = JSONResponse({"status": "ok"})
     response.delete_cookie(settings.session_cookie_name, path="/")
     return response
+
+
+@app.get("/auth/mcp-token", response_model=McpTokenResponse)
+async def auth_mcp_token(user: User = Depends(get_current_user), db=Depends(get_db)):
+    if user.is_demo:
+        raise HTTPException(status_code=403, detail="Login required to access MCP token")
+    record = get_or_create_mcp_token(user, db)
+    return McpTokenResponse(
+        token=record.token,
+        created_at=record.created_at.isoformat(),
+        last_used_at=record.last_used_at.isoformat() if record.last_used_at else None,
+    )
+
+
+@app.post("/auth/mcp-token/rotate", response_model=McpTokenResponse)
+async def auth_rotate_mcp_token(user: User = Depends(get_current_user), db=Depends(get_db)):
+    if user.is_demo:
+        raise HTTPException(status_code=403, detail="Login required to access MCP token")
+    record = rotate_mcp_token(user, db)
+    return McpTokenResponse(
+        token=record.token,
+        created_at=record.created_at.isoformat(),
+        last_used_at=record.last_used_at.isoformat() if record.last_used_at else None,
+    )
 
 
 @app.post("/upload", response_model=UploadResponse)

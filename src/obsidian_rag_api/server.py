@@ -1,7 +1,8 @@
-"""MCP Server for Obsidian RAG with tools: read_note, search, extend_context_using_nearest."""
+"""MCP Server for Obsidian RAG with tools: list_vaults, read_note, search, extend_context_using_nearest."""
 
 import asyncio
 import json
+import os
 from typing import Any
 
 from mcp.server import Server
@@ -11,7 +12,10 @@ from pydantic import BaseModel
 
 from obsidian_retriever.manager import KnowledgeBaseManager
 
+from .auth import get_user_by_mcp_token
 from .config import settings
+from .db import SessionLocal
+from .models import User, Vault
 from .vault_manager import get_vault_manager
 
 
@@ -43,10 +47,35 @@ class ExtendContextInput(BaseModel):
     current_depth: int = 0
 
 
+class ListVaultsInput(BaseModel):
+    """Input schema for list_vaults tool."""
+
+    query: str | None = None
+    limit: int = 50
+
+
 @mcp_server.list_tools()
 async def list_tools() -> list[Tool]:
     """List available tools."""
     return [
+        Tool(
+            name="list_vaults",
+            description="List available vaults for the authenticated user, optionally filtered by name.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Optional substring to filter vault names",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of vaults to return (default: 50, max: 200)",
+                        "default": 50,
+                    },
+                },
+            },
+        ),
         Tool(
             name="read_note",
             description="Read a specific note by its ID from a vault. Returns the full content of the note with all chunks.",
@@ -121,9 +150,35 @@ async def list_tools() -> list[Tool]:
 @mcp_server.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     """Handle tool calls."""
+    user, error = _resolve_stdio_user()
+    if error:
+        return [TextContent(type="text", text=error)]
+    return await call_tool_for_user(name, arguments, user)
+
+
+async def call_tool_for_user(
+    name: str, arguments: dict[str, Any], user: User
+) -> list[TextContent]:
+    """Handle tool calls for an authenticated user."""
+    if name == "list_vaults":
+        return await handle_list_vaults(arguments, user.id)
+
     vault_id = arguments.get("vault_id")
     if not vault_id:
-        return [TextContent(type="text", text="Error: vault_id is required")]
+        return [
+            TextContent(
+                type="text",
+                text="Error: vault_id is required.",
+            )
+        ]
+
+    if not _vault_belongs_to_user(vault_id, user.id):
+        return [
+            TextContent(
+                type="text",
+                text=f"Error: Vault {vault_id} not found for current user.",
+            )
+        ]
 
     retriever = get_vault_manager(vault_id)
     if not retriever:
@@ -142,6 +197,67 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         return await handle_extend_context(retriever, arguments)
     else:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
+
+
+def _resolve_stdio_user() -> tuple[User | None, str | None]:
+    token = (os.getenv("MCP_AUTH_TOKEN") or "").strip()
+    if not token:
+        return None, "Error: MCP_AUTH_TOKEN is required for MCP stdio access."
+    with SessionLocal() as db:
+        user = get_user_by_mcp_token(token, db)
+    if user is None:
+        return None, "Error: invalid MCP token."
+    return user, None
+
+
+def _vault_belongs_to_user(vault_id: str, user_id: str) -> bool:
+    with SessionLocal() as db:
+        return (
+            db.query(Vault)
+            .filter(Vault.id == vault_id, Vault.user_id == user_id)
+            .first()
+            is not None
+        )
+
+
+async def handle_list_vaults(arguments: dict[str, Any], user_id: str) -> list[TextContent]:
+    """Handle list_vaults tool call."""
+    query = arguments.get("query")
+    limit = arguments.get("limit", 50)
+
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 50
+    limit = max(1, min(limit, 200))
+
+    with SessionLocal() as db:
+        vault_query = db.query(Vault).filter(Vault.user_id == user_id)
+        if query:
+            vault_query = vault_query.filter(Vault.name.ilike(f"%{query}%"))
+
+        vaults = (
+            vault_query.order_by(Vault.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+
+    results = [
+        {
+            "vault_id": vault.id,
+            "name": vault.name,
+            "created_at": vault.created_at.isoformat() if vault.created_at else None,
+            "notes_count": vault.notes_count or 0,
+        }
+        for vault in vaults
+    ]
+
+    return [
+        TextContent(
+            type="text",
+            text=json.dumps(results, ensure_ascii=False, indent=2),
+        )
+    ]
 
 
 async def handle_read_note(
