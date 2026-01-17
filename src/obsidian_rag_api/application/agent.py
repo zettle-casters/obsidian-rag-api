@@ -35,6 +35,7 @@ class AgentState(TypedDict):
     # Input
     original_query: str
     vault_id: str
+    model_name: str | None
 
     # Conversation history
     messages: Annotated[list[dict], operator.add]
@@ -62,7 +63,7 @@ async def reformulate_node(state: AgentState) -> dict:
 
     writer("🔄 Начинаю переформулировку запроса...")
 
-    reformulated = await reformulate_query(original, history, writer)
+    reformulated = await reformulate_query(original, history, writer, state.get("model_name"))
 
     new_messages = [{"role": "user", "content": original}]
 
@@ -141,7 +142,7 @@ async def check_context_node(state: AgentState) -> dict:
     query = state["reformulated_query"] or state["original_query"]
     knowledge = state["knowledge_base"]
 
-    needs_more = await should_extend_context(query, knowledge)
+    needs_more = await should_extend_context(query, knowledge, state.get("model_name"))
 
     if needs_more and state["current_depth"] < settings.max_recursion_depth:
         return {"status": "extend"}
@@ -209,7 +210,7 @@ async def extend_context_node(state: AgentState) -> dict:
             )
 
     # Check relevance in parallel
-    relevance_results = await check_relevance_batch(query, linked_notes_data)
+    relevance_results = await check_relevance_batch(query, linked_notes_data, state.get("model_name"))
 
     # Add relevant notes to knowledge base
     new_knowledge = []
@@ -252,7 +253,7 @@ async def generate_answer_node(state: AgentState) -> dict:
     if not unique_knowledge:
         answer = "I couldn't find any relevant information in the knowledge base to answer your question."
     else:
-        answer = await generate_answer(query, unique_knowledge, history)
+        answer = await generate_answer(query, unique_knowledge, history, state.get("model_name"))
 
     # Add assistant response to history
     new_messages = [{"role": "assistant", "content": answer}]
@@ -326,13 +327,19 @@ def get_agent_for_vault(vault_id: str):
     return _agents[vault_id]
 
 
-async def run_agent_with_vault(query: str, vault_id: str, thread_id: str = "default") -> dict:
+async def run_agent_with_vault(
+    query: str,
+    vault_id: str,
+    thread_id: str = "default",
+    model_name: str | None = None,
+) -> dict:
     """Run the agent with a query for a specific vault."""
     agent = get_agent_for_vault(vault_id)
 
     initial_state = {
         "original_query": query,
         "vault_id": vault_id,
+        "model_name": model_name,
         "messages": [],
         "reformulated_query": "",
         "search_results": [],

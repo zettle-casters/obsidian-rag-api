@@ -86,12 +86,19 @@ async def exchange_code_for_user(code: str, state: str, db: Session) -> tuple[Us
 
     user = db.query(User).filter(User.google_sub == google_sub).first()
     if user is None:
+        has_admin = (
+            db.query(User)
+            .filter(User.is_demo.is_(False))
+            .count()
+            > 0
+        )
         user = User(
             google_sub=google_sub,
             email=userinfo.get("email"),
             name=userinfo.get("name"),
             avatar_url=userinfo.get("picture"),
             is_demo=False,
+            is_admin=not has_admin,
         )
         db.add(user)
     else:
@@ -110,6 +117,7 @@ def ensure_demo_user(db: Session) -> User:
             email=settings.demo_user_email,
             name="Demo Workspace",
             is_demo=True,
+            is_admin=False,
         )
         db.add(user)
         db.commit()

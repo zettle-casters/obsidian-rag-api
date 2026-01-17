@@ -9,9 +9,9 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from .config import settings
 
 
-def get_llm(cheap: bool = False, streaming: bool=False) -> ChatOpenAI:
+def get_llm(cheap: bool = False, streaming: bool = False, model_name: str | None = None) -> ChatOpenAI:
     """Get LLM instance."""
-    model = settings.openai_cheap_model if cheap else settings.openai_model
+    model = model_name or (settings.openai_cheap_model if cheap else settings.openai_model)
     return ChatOpenAI(
         model=model,
         base_url=settings.openai_base_url,
@@ -21,9 +21,14 @@ def get_llm(cheap: bool = False, streaming: bool=False) -> ChatOpenAI:
     )
 
 
-async def check_relevance(query: str, note_content: str, note_title: str) -> bool:
+async def check_relevance(
+    query: str,
+    note_content: str,
+    note_title: str,
+    model_name: str | None = None,
+) -> bool:
     """Check if a note is relevant to the query using a cheap LLM."""
-    llm = get_llm(cheap=True, streaming=False)
+    llm = get_llm(cheap=True, streaming=False, model_name=model_name)
 
     system_prompt = """You are a relevance checker. Your task is to determine if a note contains information relevant to answering a user's question.
 
@@ -52,18 +57,25 @@ Is this note relevant to answering the question? Respond with YES or NO only."""
 
 
 async def check_relevance_batch(
-    query: str, notes: list[dict[str, Any]]
+    query: str,
+    notes: list[dict[str, Any]],
+    model_name: str | None = None,
 ) -> list[bool]:
     """Check relevance for multiple notes in parallel."""
     tasks = [
-        check_relevance(query, note["content"], note["title"]) for note in notes
+        check_relevance(query, note["content"], note["title"], model_name) for note in notes
     ]
     return await asyncio.gather(*tasks)
 
 
-async def reformulate_query(original_query: str, history: list[dict] = None, writer=None) -> str:
+async def reformulate_query(
+    original_query: str,
+    history: list[dict] = None,
+    writer=None,
+    model_name: str | None = None,
+) -> str:
     """Reformulate user query for better search results."""
-    llm = get_llm(cheap=True, streaming=True)
+    llm = get_llm(cheap=True, streaming=True, model_name=model_name)
     history = history or []
 
     system_prompt = """You are a query reformulator. Your task is to reformulate user questions to make them better for semantic search.
@@ -95,9 +107,14 @@ Rules:
     return response.content.strip()
 
 
-async def generate_answer(query: str, context: list[dict[str, Any]], history: list[dict] = None) -> str:
+async def generate_answer(
+    query: str,
+    context: list[dict[str, Any]],
+    history: list[dict] = None,
+    model_name: str | None = None,
+) -> str:
     """Generate final answer based on gathered context."""
-    llm = get_llm(cheap=False, streaming=True)
+    llm = get_llm(cheap=False, streaming=True, model_name=model_name)
 
     history = history or []
 
@@ -235,13 +252,15 @@ Please answer the question based on the context above."""
 
 
 async def should_extend_context(
-    query: str, current_context: list[dict[str, Any]]
+    query: str,
+    current_context: list[dict[str, Any]],
+    model_name: str | None = None,
 ) -> bool:
     """Determine if we need to extend context to answer the query."""
     if not current_context:
         return True
 
-    llm = get_llm(cheap=True, streaming=False)
+    llm = get_llm(cheap=True, streaming=False, model_name=model_name)
 
     context_summary = "\n".join(
         f"- {note.get('title', 'Untitled')}: {note.get('content', '')[:500]}"

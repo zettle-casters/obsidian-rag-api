@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     cookie_secure: bool = False
     cookie_samesite: str = "lax"
     demo_user_email: str = "demo@local"
+    default_model_avatar_url: Optional[str] = None
 
     model_config = {"env_file": ".env"}
 

@@ -5,6 +5,8 @@ import tempfile
 import json
 import asyncio
 import subprocess
+import secrets
+from datetime import datetime
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Literal
@@ -13,6 +15,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Req
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, RedirectResponse, JSONResponse
 from pydantic import BaseModel
+from sqlalchemy import func, or_
 
 from ...application.agent import run_agent_with_vault, get_agent_for_vault
 from ...application.auth import (
@@ -27,7 +30,7 @@ from ...application.auth import (
 from ...infrastructure.db import get_db, init_db, SessionLocal
 from obsidian_retriever.utils.hash import text_hash
 
-from ...domain.models import Vault, VaultFile, Session as DbSession, User
+from ...domain.models import Chat, ChatMessage, LlmModel, Vault, VaultFile, Session as DbSession, User
 from ...application.vault_manager import (
     upload_vault,
     upload_vault_with_progress,
@@ -35,6 +38,7 @@ from ...application.vault_manager import (
     list_vaults,
     restore_vaults_from_metadata,
 )
+from ...application.model_catalog import ensure_default_models, list_models, create_model, update_model
 from ...infrastructure.config import settings
 
 
@@ -44,6 +48,7 @@ async def lifespan(app: FastAPI):
     init_db()
     with SessionLocal() as db:
         ensure_demo_user(db)
+        ensure_default_models(db)
         restore_vaults_from_metadata(db)
     yield
 
@@ -71,6 +76,8 @@ class AgentRequest(BaseModel):
     query: str
     vault_id: str
     thread_id: str | None = None
+    chat_id: str | None = None
+    model_name: str | None = None
 
 
 class AgentResponse(BaseModel):
@@ -120,6 +127,40 @@ class SyncResponse(BaseModel):
     errors: list[str]
 
 
+class ChatCreateRequest(BaseModel):
+    vault_id: str
+    title: str | None = None
+    model_name: str | None = None
+    thread_id: str | None = None
+
+
+class ChatUpdateRequest(BaseModel):
+    title: str | None = None
+    vault_id: str | None = None
+    model_name: str | None = None
+
+
+class ChatMessageCreate(BaseModel):
+    role: Literal["user", "assistant", "system"]
+    content: str
+
+
+class ModelCreateRequest(BaseModel):
+    display_name: str
+    system_name: str
+    description: str | None = None
+    avatar_url: str | None = None
+    is_enabled: bool = True
+
+
+class ModelUpdateRequest(BaseModel):
+    display_name: str | None = None
+    system_name: str | None = None
+    description: str | None = None
+    avatar_url: str | None = None
+    is_enabled: bool | None = None
+
+
 @app.get("/health")
 async def health():
     """Health check endpoint."""
@@ -133,6 +174,7 @@ def _serialize_user(user: User) -> dict:
         "name": user.name,
         "avatar_url": user.avatar_url,
         "is_demo": user.is_demo,
+        "is_admin": user.is_admin,
     }
 
 
@@ -160,6 +202,91 @@ def _get_vault_or_404(db, user: User, vault_id: str) -> Vault:
             detail=f"Vault {vault_id} not found for current user.",
         )
     return vault
+
+
+def _get_chat_or_404(db, user: User, chat_id: str) -> Chat:
+    chat = (
+        db.query(Chat)
+        .filter(Chat.id == chat_id, Chat.user_id == user.id)
+        .first()
+    )
+    if chat is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Chat {chat_id} not found for current user.",
+        )
+    return chat
+
+
+def _generate_share_token() -> str:
+    return f"share_{secrets.token_urlsafe(24)}"
+
+
+def _build_share_url(token: str | None) -> str | None:
+    if not token:
+        return None
+    return f"{settings.ui_base_url.rstrip('/')}/shared/{token}"
+
+
+def _serialize_chat(chat: Chat, message_count: int | None = None, last_message_at: datetime | None = None) -> dict:
+    return {
+        "id": chat.id,
+        "title": chat.title,
+        "vault_id": chat.vault_id,
+        "model_name": chat.model_name,
+        "thread_id": chat.thread_id,
+        "is_shared": chat.is_shared,
+        "share_token": chat.share_token,
+        "share_url": _build_share_url(chat.share_token) if chat.is_shared else None,
+        "created_at": chat.created_at.isoformat(),
+        "updated_at": chat.updated_at.isoformat() if chat.updated_at else chat.created_at.isoformat(),
+        "message_count": message_count or 0,
+        "last_message_at": last_message_at.isoformat() if last_message_at else None,
+    }
+
+
+def _serialize_chat_message(message: ChatMessage) -> dict:
+    return {
+        "id": message.id,
+        "role": message.role,
+        "content": message.content,
+        "created_at": message.created_at.isoformat(),
+    }
+
+
+def _resolve_agent_context(db, user: User, request: AgentRequest) -> tuple[str, str, str | None]:
+    vault_id = request.vault_id
+    thread_id = request.thread_id
+    model_name = request.model_name
+
+    if request.chat_id:
+        chat = _get_chat_or_404(db, user, request.chat_id)
+        vault_id = chat.vault_id
+        thread_id = chat.thread_id
+        model_name = chat.model_name
+
+    if not thread_id:
+        thread_id = str(uuid.uuid4())
+
+    return vault_id, thread_id, model_name
+
+
+def _require_admin(user: User) -> None:
+    if not getattr(user, "is_admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+
+def _serialize_model(model) -> dict:
+    return {
+        "id": model.id,
+        "display_name": model.display_name,
+        "system_name": model.system_name,
+        "description": model.description,
+        "avatar_url": model.avatar_url,
+        "is_enabled": model.is_enabled,
+        "created_at": model.created_at.isoformat(),
+        "updated_at": model.updated_at.isoformat() if model.updated_at else model.created_at.isoformat(),
+    }
 
 
 @app.get("/auth/me")
@@ -383,6 +510,307 @@ async def list_vaults_endpoint(
     return {"vaults": vaults, "count": len(vaults)}
 
 
+@app.get("/chats")
+async def list_chats_endpoint(
+    q: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    db=Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """List chats for current user, with optional search."""
+    stats_subquery = (
+        db.query(
+            ChatMessage.chat_id.label("chat_id"),
+            func.count(ChatMessage.id).label("message_count"),
+            func.max(ChatMessage.created_at).label("last_message_at"),
+        )
+        .group_by(ChatMessage.chat_id)
+        .subquery()
+    )
+
+    query = (
+        db.query(Chat, stats_subquery.c.message_count, stats_subquery.c.last_message_at)
+        .outerjoin(stats_subquery, Chat.id == stats_subquery.c.chat_id)
+        .filter(Chat.user_id == user.id)
+    )
+
+    if q:
+        pattern = f"%{q}%"
+        matching_messages = (
+            db.query(ChatMessage.chat_id)
+            .filter(ChatMessage.content.ilike(pattern))
+            .subquery()
+        )
+        query = query.filter(
+            or_(
+                Chat.title.ilike(pattern),
+                Chat.id.in_(matching_messages),
+            )
+        )
+
+    query = query.order_by(Chat.updated_at.desc()).offset(offset).limit(limit)
+
+    chats = [
+        _serialize_chat(chat, message_count or 0, last_message_at)
+        for chat, message_count, last_message_at in query.all()
+    ]
+
+    return {"chats": chats, "count": len(chats)}
+
+
+@app.post("/chats")
+async def create_chat_endpoint(
+    payload: ChatCreateRequest,
+    db=Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Create a new chat."""
+    _get_vault_or_404(db, user, payload.vault_id)
+    model_name = payload.model_name.strip() if payload.model_name else None
+    if model_name:
+        model = (
+            db.query(LlmModel)
+            .filter(LlmModel.system_name == model_name, LlmModel.is_enabled.is_(True))
+            .first()
+        )
+        if model is None:
+            raise HTTPException(status_code=400, detail="Model is not available")
+
+    title = (payload.title or "").strip() or "Новый чат"
+    title = title[:120]
+    thread_id = payload.thread_id or str(uuid.uuid4())
+
+    chat = Chat(
+        user_id=user.id,
+        vault_id=payload.vault_id,
+        title=title,
+        model_name=model_name,
+        thread_id=thread_id,
+    )
+    db.add(chat)
+    db.commit()
+    db.refresh(chat)
+
+    return {"chat": _serialize_chat(chat, 0, None)}
+
+
+@app.get("/chats/{chat_id}")
+async def get_chat_endpoint(
+    chat_id: str,
+    db=Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Get a chat with full message history."""
+    chat = _get_chat_or_404(db, user, chat_id)
+    messages = (
+        db.query(ChatMessage)
+        .filter(ChatMessage.chat_id == chat.id)
+        .order_by(ChatMessage.created_at.asc())
+        .all()
+    )
+    last_message_at = messages[-1].created_at if messages else None
+    return {
+        "chat": _serialize_chat(chat, len(messages), last_message_at),
+        "messages": [_serialize_chat_message(message) for message in messages],
+    }
+
+
+@app.patch("/chats/{chat_id}")
+async def update_chat_endpoint(
+    chat_id: str,
+    payload: ChatUpdateRequest,
+    db=Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Update chat settings."""
+    chat = _get_chat_or_404(db, user, chat_id)
+
+    if payload.vault_id:
+        _get_vault_or_404(db, user, payload.vault_id)
+        chat.vault_id = payload.vault_id
+
+    if payload.title is not None:
+        title = payload.title.strip()
+        chat.title = title[:120] if title else "Новый чат"
+
+    if payload.model_name is not None:
+        model_name = payload.model_name.strip() if payload.model_name else None
+        if model_name:
+            model = (
+                db.query(LlmModel)
+                .filter(LlmModel.system_name == model_name, LlmModel.is_enabled.is_(True))
+                .first()
+            )
+            if model is None:
+                raise HTTPException(status_code=400, detail="Model is not available")
+        chat.model_name = model_name
+
+    chat.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(chat)
+
+    message_count = db.query(func.count(ChatMessage.id)).filter(ChatMessage.chat_id == chat.id).scalar() or 0
+    last_message_at = (
+        db.query(func.max(ChatMessage.created_at))
+        .filter(ChatMessage.chat_id == chat.id)
+        .scalar()
+    )
+
+    return {"chat": _serialize_chat(chat, message_count, last_message_at)}
+
+
+@app.post("/chats/{chat_id}/messages")
+async def add_chat_message_endpoint(
+    chat_id: str,
+    payload: ChatMessageCreate,
+    db=Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Append a message to a chat."""
+    chat = _get_chat_or_404(db, user, chat_id)
+    message = ChatMessage(chat_id=chat.id, role=payload.role, content=payload.content)
+    chat.updated_at = datetime.utcnow()
+
+    db.add(message)
+    db.commit()
+    db.refresh(message)
+
+    return {"message": _serialize_chat_message(message)}
+
+
+@app.post("/chats/{chat_id}/share")
+async def enable_chat_share_endpoint(
+    chat_id: str,
+    db=Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Enable public read-only access for a chat."""
+    chat = _get_chat_or_404(db, user, chat_id)
+    if not chat.share_token:
+        chat.share_token = _generate_share_token()
+    chat.is_shared = True
+    chat.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(chat)
+
+    message_count = db.query(func.count(ChatMessage.id)).filter(ChatMessage.chat_id == chat.id).scalar() or 0
+    last_message_at = (
+        db.query(func.max(ChatMessage.created_at))
+        .filter(ChatMessage.chat_id == chat.id)
+        .scalar()
+    )
+
+    return {"chat": _serialize_chat(chat, message_count, last_message_at)}
+
+
+@app.delete("/chats/{chat_id}/share")
+async def disable_chat_share_endpoint(
+    chat_id: str,
+    db=Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Disable public sharing for a chat."""
+    chat = _get_chat_or_404(db, user, chat_id)
+    chat.is_shared = False
+    chat.share_token = None
+    chat.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(chat)
+
+    message_count = db.query(func.count(ChatMessage.id)).filter(ChatMessage.chat_id == chat.id).scalar() or 0
+    last_message_at = (
+        db.query(func.max(ChatMessage.created_at))
+        .filter(ChatMessage.chat_id == chat.id)
+        .scalar()
+    )
+
+    return {"chat": _serialize_chat(chat, message_count, last_message_at)}
+
+
+@app.get("/chats/shared/{share_token}")
+async def get_shared_chat_endpoint(
+    share_token: str,
+    db=Depends(get_db),
+):
+    """Get a shared chat by token (read-only)."""
+    chat = (
+        db.query(Chat)
+        .filter(Chat.share_token == share_token, Chat.is_shared.is_(True))
+        .first()
+    )
+    if chat is None:
+        raise HTTPException(status_code=404, detail="Shared chat not found")
+
+    messages = (
+        db.query(ChatMessage)
+        .filter(ChatMessage.chat_id == chat.id)
+        .order_by(ChatMessage.created_at.asc())
+        .all()
+    )
+    last_message_at = messages[-1].created_at if messages else None
+
+    return {
+        "chat": _serialize_chat(chat, len(messages), last_message_at),
+        "messages": [_serialize_chat_message(message) for message in messages],
+    }
+
+
+@app.get("/models")
+async def list_models_endpoint(
+    include_disabled: bool = False,
+    db=Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """List available LLM models."""
+    allow_disabled = include_disabled and user.is_admin
+    models = list_models(db, include_disabled=allow_disabled)
+    return {"models": [_serialize_model(model) for model in models]}
+
+
+@app.post("/models")
+async def create_model_endpoint(
+    payload: ModelCreateRequest,
+    db=Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Create a new LLM model (admin only)."""
+    _require_admin(user)
+    model = create_model(
+        db=db,
+        display_name=payload.display_name.strip(),
+        system_name=payload.system_name.strip(),
+        description=payload.description,
+        avatar_url=payload.avatar_url,
+        is_enabled=payload.is_enabled,
+    )
+    return {"model": _serialize_model(model)}
+
+
+@app.patch("/models/{model_id}")
+async def update_model_endpoint(
+    model_id: str,
+    payload: ModelUpdateRequest,
+    db=Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Update an LLM model (admin only)."""
+    _require_admin(user)
+    model = db.query(LlmModel).filter(LlmModel.id == model_id).first()
+    if model is None:
+        raise HTTPException(status_code=404, detail="Model not found")
+    model = update_model(
+        db=db,
+        model=model,
+        display_name=payload.display_name.strip() if payload.display_name is not None else None,
+        system_name=payload.system_name.strip() if payload.system_name is not None else None,
+        description=payload.description,
+        avatar_url=payload.avatar_url,
+        is_enabled=payload.is_enabled,
+    )
+    return {"model": _serialize_model(model)}
+
+
 @app.post("/sync/push", response_model=SyncResponse)
 async def sync_push_endpoint(
     request: SyncRequest,
@@ -498,16 +926,17 @@ async def agent_endpoint(
     4. Recursively extend context by exploring linked notes if needed
     5. Generate a final answer based on accumulated knowledge
     """
-    _get_vault_or_404(db, user, request.vault_id)
-    get_or_create_vault_manager(request.vault_id)
+    vault_id, thread_id, model_name = _resolve_agent_context(db, user, request)
 
-    thread_id = request.thread_id or str(uuid.uuid4())
+    _get_vault_or_404(db, user, vault_id)
+    get_or_create_vault_manager(vault_id)
 
     try:
         result = await run_agent_with_vault(
             query=request.query,
-            vault_id=request.vault_id,
+            vault_id=vault_id,
             thread_id=thread_id,
+            model_name=model_name,
         )
         return AgentResponse(
             query=result["query"],
@@ -516,7 +945,7 @@ async def agent_endpoint(
             notes_used=result["notes_used"],
             max_depth_reached=result["max_depth_reached"],
             thread_id=thread_id,
-            vault_id=request.vault_id,
+            vault_id=vault_id,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -533,17 +962,18 @@ async def agent_stream_endpoint(
 
     Returns Server-Sent Events with status updates.
     """
-    _get_vault_or_404(db, user, request.vault_id)
-    get_or_create_vault_manager(request.vault_id)
+    vault_id, thread_id, model_name = _resolve_agent_context(db, user, request)
 
-    thread_id = request.thread_id or str(uuid.uuid4())
+    _get_vault_or_404(db, user, vault_id)
+    get_or_create_vault_manager(vault_id)
 
     async def generate():
-        agent = get_agent_for_vault(request.vault_id)
+        agent = get_agent_for_vault(vault_id)
 
         initial_state = {
             "original_query": request.query,
-            "vault_id": request.vault_id,
+            "vault_id": vault_id,
+            "model_name": model_name,
             "messages": [],
             "reformulated_query": "",
             "search_results": [],
@@ -573,7 +1003,7 @@ async def agent_stream_endpoint(
 async def stream_events(agent, initial_state, config, request):
     """Stream LangGraph agent events with proper handling."""
     thread_id = config["configurable"].get("thread_id")
-    vault_id = request.vault_id
+    vault_id = initial_state.get("vault_id")
 
     yield f"data: {json.dumps({'status': 'started', 'thread_id': thread_id})}\n\n"
 
