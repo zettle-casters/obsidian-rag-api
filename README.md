@@ -49,22 +49,9 @@ obsidian-rag-api/
 
 - **UUID-based isolation** — каждый vault получает уникальный ID
 - **In-memory storage** — vault'ы хранятся в памяти (теряются при перезапуске)
-- **ObsidianRetriever integration** — создает инстанс ObsidianRetriever для каждого vault
+- **obsidian_retriever integration** — создает KnowledgeBaseManager для каждого vault
 
-**Основные методы:**
-
-```python
-vault_manager = VaultManager()
-
-# Создать новый vault
-vault_id = vault_manager.create_vault(retriever: ObsidianRetriever)
-
-# Получить retriever по ID
-retriever = vault_manager.get_vault(vault_id: str)
-
-# Список всех vault ID
-vault_ids = vault_manager.list_vaults()
-```
+**Основные методы:** `upload_vault`, `upload_vault_with_progress`, `get_or_create_vault_manager`
 
 ### 🤖 agent.py
 
@@ -282,32 +269,15 @@ uv add obsidian-rag-api
 ### Пример
 
 ```python
-from obsidian_rag_api.vault_manager import VaultManager
-from obsidian_rag_api.agent import create_agent_graph
-from obsidian_retriever import ObsidianRetriever
+from obsidian_rag_api.application.vault_manager import create_vault_manager
+from obsidian_rag_api.application.agent import run_agent_with_vault
 
-# 1. Создать retriever
-retriever = ObsidianRetriever(
-    neo4j_uri="bolt://localhost:7687",
-    neo4j_user="neo4j",
-    neo4j_password="password",
-    qdrant_host="localhost",
-    qdrant_port=6333,
-    collection_name="my_vault"
-)
+vault_id = "your-vault-id"
+manager = create_vault_manager(vault_id)
+manager.init_vault_from_zip("/path/to/vault.zip")
 
-# 2. Зарегистрировать vault
-vault_manager = VaultManager()
-vault_id = vault_manager.create_vault(retriever)
-
-# 3. Использовать агент
-graph = create_agent_graph()
-result = await graph.ainvoke({
-    "original_query": "Что такое квантовая механика?",
-    "vault_id": vault_id
-})
-
-print(result["final_answer"])
+result = await run_agent_with_vault("Что такое квантовая механика?", vault_id)
+print(result["answer"])
 ```
 
 ## Зависимости
