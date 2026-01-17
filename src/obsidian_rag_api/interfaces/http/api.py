@@ -657,14 +657,14 @@ def serialize_output(output):
 
 def find_project_root() -> Path:
     """
-    Find the project root by searching for the workspace root.
+    Find the project root by searching for test fixtures or a git marker.
 
     Returns:
         Path to the project root
     """
     current = Path(__file__).resolve()
 
-    # Prefer the workspace root that contains tests (avoid submodule .git files).
+    # Prefer backend src root that contains tests.
     for parent in [current] + list(current.parents):
         if (parent / "obsidian_rag_tests").exists():
             return parent
@@ -682,7 +682,7 @@ def find_project_root() -> Path:
 @app.post("/tests/run")
 async def run_tests_endpoint():
     """
-    Run all tests from the obsidian_rag_tests submodule with streaming progress.
+    Run all tests from the obsidian_rag_tests bundle with streaming progress.
 
     Returns:
         Server-Sent Events stream with detailed test execution progress for each test case
@@ -697,14 +697,14 @@ async def run_tests_endpoint():
             if not tests_path.exists():
                 error_event = {
                     "type": "error",
-                    "message": "obsidian_rag_tests submodule not found",
+                    "message": "obsidian_rag_tests not found",
                     "error": f"Path {tests_path} does not exist. Project root: {project_root}"
                 }
                 yield f"data: {json.dumps(error_event, ensure_ascii=False)}\n\n"
                 return
 
             # Add tests path to sys.path
-            tests_src = str(tests_path / "src")
+            tests_src = str(tests_path)
             if tests_src not in sys.path:
                 sys.path.insert(0, tests_src)
 
@@ -717,7 +717,7 @@ async def run_tests_endpoint():
             # ==== Test Suite 1: check_relevance ====
             yield f"data: {json.dumps({'type': 'test_suite_start', 'suite': 'check_relevance', 'name': 'Проверка релевантности заметок'}, ensure_ascii=False)}\n\n"
 
-            check_relevance_path = tests_path / "src" / "obsidian_rag_tests" / "test_check_relevance"
+            check_relevance_path = tests_path / "test_check_relevance"
             cases_file = check_relevance_path / "test_cases.json"
 
             with open(cases_file, 'r', encoding='utf-8') as f:
@@ -792,7 +792,7 @@ async def run_tests_endpoint():
             # ==== Test Suite 2: should_extend_context ====
             yield f"data: {json.dumps({'type': 'test_suite_start', 'suite': 'should_extend_context', 'name': 'Проверка необходимости расширения контекста'}, ensure_ascii=False)}\n\n"
 
-            extend_context_path = tests_path / "src" / "obsidian_rag_tests" / "test_should_extend_context"
+            extend_context_path = tests_path / "test_should_extend_context"
             cases_file = extend_context_path / "test_cases.json"
 
             with open(cases_file, 'r', encoding='utf-8') as f:
@@ -901,14 +901,14 @@ async def get_test_results():
         if not tests_path.exists():
             raise HTTPException(
                 status_code=404,
-                detail="obsidian_rag_tests submodule not found"
+                detail="obsidian_rag_tests not found"
             )
 
         results = {}
 
         # Read check_relevance results
-        check_relevance_results_path = tests_path / "src" / "obsidian_rag_tests" / "test_check_relevance" / "test_results.json"
-        check_relevance_stats_path = tests_path / "src" / "obsidian_rag_tests" / "test_check_relevance" / "test_stats.txt"
+        check_relevance_results_path = tests_path / "test_check_relevance" / "test_results.json"
+        check_relevance_stats_path = tests_path / "test_check_relevance" / "test_stats.txt"
 
         if check_relevance_results_path.exists():
             with open(check_relevance_results_path, 'r', encoding='utf-8') as f:
@@ -919,8 +919,8 @@ async def get_test_results():
                 results['check_relevance_stats'] = f.read()
 
         # Read should_extend_context results
-        extend_context_results_path = tests_path / "src" / "obsidian_rag_tests" / "test_should_extend_context" / "test_results.json"
-        extend_context_stats_path = tests_path / "src" / "obsidian_rag_tests" / "test_should_extend_context" / "test_stats.txt"
+        extend_context_results_path = tests_path / "test_should_extend_context" / "test_results.json"
+        extend_context_stats_path = tests_path / "test_should_extend_context" / "test_stats.txt"
 
         if extend_context_results_path.exists():
             with open(extend_context_results_path, 'r', encoding='utf-8') as f:
