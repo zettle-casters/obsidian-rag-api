@@ -35,10 +35,25 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
 
-    # Путь для сохранения метаданных vault'ов
-    vaults_metadata_path: str = "/app/data/.vaults_metadata.json"
+    database_url: str
+    web_origins: str = "http://localhost:3000"
+    ui_base_url: str = "http://localhost:3000"
+
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    google_redirect_uri: str = "http://localhost:8000/auth/google/callback"
+
+    session_cookie_name: str = "obsidian_session"
+    session_ttl_days: int = 30
+    cookie_secure: bool = False
+    cookie_samesite: str = "lax"
+    demo_user_email: str = "demo@local"
 
     model_config = {"env_file": ".env"}
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [origin.strip() for origin in self.web_origins.split(",") if origin.strip()]
 
 
 settings = Settings()

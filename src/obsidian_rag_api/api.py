@@ -8,21 +8,32 @@ import subprocess
 from pathlib import Path
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, RedirectResponse, JSONResponse
 from pydantic import BaseModel
 
 from .agent import run_agent_with_vault, get_agent_for_vault
-from .vault_manager import upload_vault, upload_vault_with_progress, get_vault_manager, list_vaults, restore_vaults_from_metadata
+from .auth import build_google_auth_redirect, create_session, ensure_demo_user, exchange_code_for_user, get_current_user
+from .db import get_db, init_db, SessionLocal
+from .models import Vault, Session as DbSession, User
+from .vault_manager import (
+    upload_vault,
+    upload_vault_with_progress,
+    get_or_create_vault_manager,
+    list_vaults,
+    restore_vaults_from_metadata,
+)
 from .config import settings
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan."""
-    # Restore vaults from metadata on startup
-    restore_vaults_from_metadata()
+    init_db()
+    with SessionLocal() as db:
+        ensure_demo_user(db)
+        restore_vaults_from_metadata(db)
     yield
 
 
@@ -36,7 +47,7 @@ app = FastAPI(
 # Add CORS middleware for web UI
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify exact origins
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -77,12 +88,87 @@ async def health():
     return {"status": "healthy"}
 
 
+def _serialize_user(user: User) -> dict:
+    return {
+        "id": user.id,
+        "email": user.email,
+        "name": user.name,
+        "avatar_url": user.avatar_url,
+        "is_demo": user.is_demo,
+    }
+
+
+def _get_vault_or_404(db, user: User, vault_id: str) -> Vault:
+    vault = (
+        db.query(Vault)
+        .filter(Vault.id == vault_id, Vault.user_id == user.id)
+        .first()
+    )
+    if vault is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Vault {vault_id} not found for current user.",
+        )
+    return vault
+
+
+@app.get("/auth/me")
+async def auth_me(user: User = Depends(get_current_user)):
+    return {"user": _serialize_user(user)}
+
+
+@app.get("/auth/google/login")
+async def google_login(return_to: str | None = None, db=Depends(get_db)):
+    if not settings.google_client_id or not settings.google_client_secret:
+        raise HTTPException(status_code=500, detail="Google OAuth is not configured")
+    redirect_target = return_to or settings.ui_base_url
+    if not redirect_target.startswith(settings.ui_base_url):
+        redirect_target = settings.ui_base_url
+    url = build_google_auth_redirect(redirect_target, db)
+    return RedirectResponse(url)
+
+
+@app.get("/auth/google/callback")
+async def google_callback(request: Request, code: str | None = None, state: str | None = None, db=Depends(get_db)):
+    if not code or not state:
+        raise HTTPException(status_code=400, detail="Missing OAuth code or state")
+
+    user, return_to = await exchange_code_for_user(code, state, db)
+    session = create_session(user, db)
+
+    response = RedirectResponse(return_to or settings.ui_base_url)
+    response.set_cookie(
+        settings.session_cookie_name,
+        session.token,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite=settings.cookie_samesite,
+        max_age=settings.session_ttl_days * 24 * 60 * 60,
+        path="/",
+    )
+    return response
+
+
+@app.post("/auth/logout")
+async def logout(request: Request, db=Depends(get_db)):
+    token = request.cookies.get(settings.session_cookie_name)
+    if token:
+        db.query(DbSession).filter(DbSession.token == token).delete()
+        db.commit()
+    response = JSONResponse({"status": "ok"})
+    response.delete_cookie(settings.session_cookie_name, path="/")
+    return response
+
+
 @app.post("/upload", response_model=UploadResponse)
 async def upload_endpoint(
         file: UploadFile = File(...),
+        vault_name: str = Form(""),
         include_paths: str = Form(""),
         exclude_paths: str = Form(""),
         chunk_size: int = Form(500),
+        db=Depends(get_db),
+        user: User = Depends(get_current_user),
 ):
     """
     Upload and initialize a vault from a ZIP file.
@@ -115,11 +201,15 @@ async def upload_endpoint(
             tmp_path = tmp_file.name
 
         # Upload and initialize vault
+        final_vault_name = vault_name.strip() if vault_name.strip() else file.filename.replace(".zip", "")
         vault_id = await upload_vault(
             zip_file_path=tmp_path,
+            db=db,
+            owner_id=user.id,
             include_paths=include_list,
             exclude_paths=exclude_list,
             chunk_size=chunk_size,
+            vault_name=final_vault_name,
         )
 
         # Clean up temporary file
@@ -142,6 +232,7 @@ async def upload_stream_endpoint(
         include_paths: str = Form(""),
         exclude_paths: str = Form(""),
         chunk_size: int = Form(500),
+        user: User = Depends(get_current_user),
 ):
     """
     Upload and initialize a vault from a ZIP file with streaming progress updates.
@@ -169,6 +260,7 @@ async def upload_stream_endpoint(
 
     async def generate():
         tmp_path = None
+        db_session = SessionLocal()
         try:
             # Save uploaded file to temporary location
             with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp_file:
@@ -182,6 +274,8 @@ async def upload_stream_endpoint(
             # Stream progress updates
             async for progress_update in upload_vault_with_progress(
                     zip_file_path=tmp_path,
+                    db=db_session,
+                    owner_id=user.id,
                     vault_name=final_vault_name,
                     include_paths=include_list,
                     exclude_paths=exclude_list,
@@ -201,6 +295,7 @@ async def upload_stream_endpoint(
             # Clean up temporary file
             if tmp_path and Path(tmp_path).exists():
                 Path(tmp_path).unlink()
+            db_session.close()
 
     return StreamingResponse(
         generate(),
@@ -208,20 +303,26 @@ async def upload_stream_endpoint(
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "Access-Control-Allow-Origin": "*",
         }
     )
 
 
 @app.get("/vaults")
-async def list_vaults_endpoint():
+async def list_vaults_endpoint(
+    db=Depends(get_db),
+    user: User = Depends(get_current_user),
+):
     """List all uploaded vaults."""
-    vaults = list_vaults()
+    vaults = list_vaults(db, user.id)
     return {"vaults": vaults, "count": len(vaults)}
 
 
 @app.post("/agent", response_model=AgentResponse)
-async def agent_endpoint(request: AgentRequest):
+async def agent_endpoint(
+    request: AgentRequest,
+    db=Depends(get_db),
+    user: User = Depends(get_current_user),
+):
     """
     Query the Obsidian RAG agent for a specific vault.
 
@@ -232,12 +333,8 @@ async def agent_endpoint(request: AgentRequest):
     4. Recursively extend context by exploring linked notes if needed
     5. Generate a final answer based on accumulated knowledge
     """
-    # Verify vault exists
-    if not get_vault_manager(request.vault_id):
-        raise HTTPException(
-            status_code=404,
-            detail=f"Vault {request.vault_id} not found. Please upload a vault first using /upload.",
-        )
+    _get_vault_or_404(db, user, request.vault_id)
+    get_or_create_vault_manager(request.vault_id)
 
     thread_id = request.thread_id or str(uuid.uuid4())
 
@@ -261,18 +358,18 @@ async def agent_endpoint(request: AgentRequest):
 
 
 @app.post("/agent/stream")
-async def agent_stream_endpoint(request: AgentRequest):
+async def agent_stream_endpoint(
+    request: AgentRequest,
+    db=Depends(get_db),
+    user: User = Depends(get_current_user),
+):
     """
     Stream the agent's progress as it processes the query.
 
     Returns Server-Sent Events with status updates.
     """
-    # Verify vault exists
-    if not get_vault_manager(request.vault_id):
-        raise HTTPException(
-            status_code=404,
-            detail=f"Vault {request.vault_id} not found. Please upload a vault first using /upload.",
-        )
+    _get_vault_or_404(db, user, request.vault_id)
+    get_or_create_vault_manager(request.vault_id)
 
     thread_id = request.thread_id or str(uuid.uuid4())
 
@@ -304,7 +401,6 @@ async def agent_stream_endpoint(request: AgentRequest):
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "Access-Control-Allow-Origin": "*",
         }
     )
 
@@ -621,7 +717,6 @@ async def run_tests_endpoint():
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "Access-Control-Allow-Origin": "*",
         }
     )
 
