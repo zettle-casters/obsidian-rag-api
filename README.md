@@ -19,13 +19,13 @@ API и MCP серверы для интеллектуальной работы �
 obsidian-rag-api/
 ├── src/obsidian_rag_api/
 │   ├── __init__.py
-│   ├── config.py          # Конфигурация из переменных окружения
-│   ├── vault_manager.py   # Управление множественными vault'ами
-│   ├── llm.py             # Утилиты для работы с LLM
-│   ├── server.py          # MCP Server (stdio transport)
-│   ├── server_http.py     # MCP Server (HTTP transport)
-│   ├── agent.py           # LangGraph агент
-│   └── api.py             # FastAPI REST endpoints
+│   ├── domain/            # Доменные сущности (SQLAlchemy модели)
+│   ├── application/       # Сценарии и сервисы (auth, vaults, agent)
+│   ├── infrastructure/    # DB/LLM конфиги и адаптеры
+│   ├── interfaces/        # HTTP/MCP интерфейсы
+│   ├── api.py             # Wrapper: FastAPI REST endpoints
+│   ├── server.py          # Wrapper: MCP Server (stdio transport)
+│   └── server_http.py     # Wrapper: MCP Server (HTTP transport)
 └── pyproject.toml
 ```
 

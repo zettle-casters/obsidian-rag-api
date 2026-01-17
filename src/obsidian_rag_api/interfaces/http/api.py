@@ -669,11 +669,10 @@ def find_project_root() -> Path:
         if (parent / "obsidian_rag_tests").exists():
             return parent
 
-    # Search up the directory tree for a real git directory.
+    # Search up the directory tree for a git marker.
     for parent in [current] + list(current.parents):
-        # Check for .git directory (most reliable indicator)
-        git_dir = parent / ".git"
-        if git_dir.exists() and git_dir.is_dir():
+        git_path = parent / ".git"
+        if git_path.exists():
             return parent
 
     # Fallback: go up 4 levels from current file
