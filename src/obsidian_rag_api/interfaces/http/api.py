@@ -703,6 +703,11 @@ async def run_tests_endpoint():
                 yield f"data: {json.dumps(error_event, ensure_ascii=False)}\n\n"
                 return
 
+            def _preview(text: str | None, max_len: int = 50) -> str:
+                if not text:
+                    return ""
+                return f"{text[:max_len]}..." if len(text) > max_len else text
+
             # Add tests path to sys.path
             tests_src = str(tests_path)
             if tests_src not in sys.path:
@@ -720,25 +725,33 @@ async def run_tests_endpoint():
             check_relevance_path = tests_path / "test_check_relevance"
             cases_file = check_relevance_path / "test_cases.json"
 
-            with open(cases_file, 'r', encoding='utf-8') as f:
-                check_relevance_data = json.load(f)
+            try:
+                with open(cases_file, 'r', encoding='utf-8') as f:
+                    check_relevance_data = json.load(f)
+            except Exception as e:
+                yield f"data: {json.dumps({'type': 'test_error', 'suite': 'check_relevance', 'id': 'load', 'error': str(e)}, ensure_ascii=False)}\n\n"
+                check_relevance_data = {"cases": []}
 
             check_relevance_cases = check_relevance_data.get("cases", [])
+            if not isinstance(check_relevance_cases, list):
+                check_relevance_cases = []
             check_relevance_results = []
 
             for i, case in enumerate(check_relevance_cases):
-                test_id = case.get("id")
-                query = case.get("query")
-                note = case["note"]
-                expected = case.get("expected_value")
-                complexity = case.get("complexity")
+                test_id = case.get("id", f"check_relevance-{i}")
+                query = case.get("query") if isinstance(case, dict) else None
+                note = case.get("note") if isinstance(case, dict) else None
+                expected = case.get("expected_value") if isinstance(case, dict) else None
+                complexity = case.get("complexity") if isinstance(case, dict) else None
 
                 # Notify test start
-                yield f"data: {json.dumps({'type': 'test_start', 'suite': 'check_relevance', 'id': test_id, 'query': query[:50] + '...' if len(query) > 50 else query, 'complexity': complexity}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'type': 'test_start', 'suite': 'check_relevance', 'id': test_id, 'query': _preview(query), 'complexity': complexity}, ensure_ascii=False)}\n\n"
 
                 # Run test
                 try:
-                    result = await check_relevance(query, note["content"], note["title"])
+                    if not note or "content" not in note or "title" not in note:
+                        raise ValueError("Missing note content/title in test case")
+                    result = await check_relevance(query or "", note["content"], note["title"])
                     passed = (bool(result) == bool(expected)) if expected is not None else None
 
                     check_relevance_results.append({
@@ -795,25 +808,33 @@ async def run_tests_endpoint():
             extend_context_path = tests_path / "test_should_extend_context"
             cases_file = extend_context_path / "test_cases.json"
 
-            with open(cases_file, 'r', encoding='utf-8') as f:
-                extend_context_data = json.load(f)
+            try:
+                with open(cases_file, 'r', encoding='utf-8') as f:
+                    extend_context_data = json.load(f)
+            except Exception as e:
+                yield f"data: {json.dumps({'type': 'test_error', 'suite': 'should_extend_context', 'id': 'load', 'error': str(e)}, ensure_ascii=False)}\n\n"
+                extend_context_data = {"cases": []}
 
             extend_context_cases = extend_context_data.get("cases", [])
+            if not isinstance(extend_context_cases, list):
+                extend_context_cases = []
             extend_context_results = []
 
             for i, case in enumerate(extend_context_cases):
-                test_id = case.get("id")
-                query = case.get("query")
-                context = case.get("context", [])
-                expected = case.get("expected_value")
-                complexity = case.get("complexity")
+                test_id = case.get("id", f"should_extend_context-{i}")
+                query = case.get("query") if isinstance(case, dict) else None
+                context = case.get("context", []) if isinstance(case, dict) else []
+                expected = case.get("expected_value") if isinstance(case, dict) else None
+                complexity = case.get("complexity") if isinstance(case, dict) else None
 
                 # Notify test start
-                yield f"data: {json.dumps({'type': 'test_start', 'suite': 'should_extend_context', 'id': test_id, 'query': query[:50] + '...' if len(query) > 50 else query, 'complexity': complexity}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'type': 'test_start', 'suite': 'should_extend_context', 'id': test_id, 'query': _preview(query), 'complexity': complexity}, ensure_ascii=False)}\n\n"
 
                 # Run test
                 try:
-                    result = await should_extend_context(query, context)
+                    if not isinstance(context, list):
+                        raise ValueError("Context must be a list")
+                    result = await should_extend_context(query or "", context)
                     passed = (bool(result) == bool(expected)) if expected is not None else None
 
                     extend_context_results.append({
