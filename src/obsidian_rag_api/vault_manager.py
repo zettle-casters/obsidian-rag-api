@@ -3,27 +3,26 @@
 import uuid
 import tempfile
 import zipfile
-import json
 from pathlib import Path
-from typing import Optional, Callable, AsyncGenerator
+from typing import Optional, AsyncGenerator
 from datetime import datetime
 
 from obsidian_retriever.manager import KnowledgeBaseManager
 from obsidian_retriever.schemas import NoteRecord
 
 from .config import settings
+from .models import Vault
+from sqlalchemy.orm import Session
 
 
 # Global registry: vault_id -> KnowledgeBaseManager
 _vault_managers: dict[str, KnowledgeBaseManager] = {}
 
-# Vault metadata storage
-_vault_metadata: dict[str, dict] = {}
-
 
 def create_vault_manager(vault_id: str) -> KnowledgeBaseManager:
     """Create a new KnowledgeBaseManager for a specific vault."""
     manager = KnowledgeBaseManager(
+        vault_id=vault_id,
         db_url=settings.neo4j_url,
         host=settings.qdrant_host,
         port=settings.qdrant_port,
@@ -51,9 +50,12 @@ def get_or_create_vault_manager(vault_id: str) -> KnowledgeBaseManager:
 
 async def upload_vault(
     zip_file_path: str,
+    db: Session,
+    owner_id: str,
     include_paths: list[str] = None,
     exclude_paths: list[str] = None,
     chunk_size: int = 500,
+    vault_name: str | None = None,
 ) -> str:
     """
     Upload and initialize a vault from a ZIP file.
@@ -78,22 +80,26 @@ async def upload_vault(
         max_chunk_size=chunk_size,
     )
 
-    # Save metadata
-    _vault_metadata[vault_id] = {
-        "vault_id": vault_id,
-        "created_at": datetime.now().isoformat(),
-        "name": Path(zip_file_path).stem,
-        "include_paths": include_paths,
-        "exclude_paths": exclude_paths,
-        "chunk_size": chunk_size,
-    }
-    _save_metadata()
+    final_name = vault_name if vault_name else Path(zip_file_path).stem
+    db.add(Vault(
+        id=vault_id,
+        user_id=owner_id,
+        name=final_name,
+        created_at=datetime.now(),
+        include_paths=include_paths,
+        exclude_paths=exclude_paths,
+        chunk_size=chunk_size,
+        notes_count=0,
+    ))
+    db.commit()
 
     return vault_id
 
 
 async def upload_vault_with_progress(
     zip_file_path: str,
+    db: Session,
+    owner_id: str,
     vault_name: str = None,
     include_paths: list[str] = None,
     exclude_paths: list[str] = None,
@@ -217,7 +223,7 @@ async def upload_vault_with_progress(
             path_to_note_id = {}
             for note_dict in notes_data:
                 path = note_dict["path"]
-                note_id = path
+                note_id = manager._qualify_note_id(path)
                 path_to_note_id[path] = note_id
 
             # Process chunks and build graph structures
@@ -338,19 +344,18 @@ async def upload_vault_with_progress(
             }
 
         # Save metadata
-        # Use provided vault_name or fallback to filename without .zip
         final_name = vault_name if vault_name else Path(zip_file_path).stem
-
-        _vault_metadata[vault_id] = {
-            "vault_id": vault_id,
-            "created_at": datetime.now().isoformat(),
-            "name": final_name,
-            "include_paths": include_paths,
-            "exclude_paths": exclude_paths,
-            "chunk_size": chunk_size,
-            "notes_count": total_notes,
-        }
-        _save_metadata()
+        db.add(Vault(
+            id=vault_id,
+            user_id=owner_id,
+            name=final_name,
+            created_at=datetime.now(),
+            include_paths=include_paths,
+            exclude_paths=exclude_paths,
+            chunk_size=chunk_size,
+            notes_count=total_notes,
+        ))
+        db.commit()
 
         # Final success message
         yield {
@@ -370,66 +375,48 @@ async def upload_vault_with_progress(
         }
 
 
-def list_vaults() -> list[dict]:
-    """List all registered vaults with metadata."""
-    vaults = []
-    for vault_id in _vault_managers.keys():
-        metadata = _vault_metadata.get(vault_id, {})
-        vaults.append({
-            "vault_id": vault_id,
-            "name": metadata.get("name", "Unknown"),
-            "created_at": metadata.get("created_at"),
-            "notes_count": metadata.get("notes_count", 0),
-        })
-    return vaults
+def list_vaults(db: Session, owner_id: str) -> list[dict]:
+    """List all registered vaults with metadata for a specific user."""
+    vaults = (
+        db.query(Vault)
+        .filter(Vault.user_id == owner_id)
+        .order_by(Vault.created_at.desc())
+        .all()
+    )
+    return [
+        {
+            "vault_id": vault.id,
+            "name": vault.name,
+            "created_at": vault.created_at.isoformat() if vault.created_at else None,
+            "notes_count": vault.notes_count or 0,
+        }
+        for vault in vaults
+    ]
 
 
-def delete_vault(vault_id: str) -> bool:
+def delete_vault(db: Session, vault_id: str, owner_id: str) -> bool:
     """Remove a vault from the registry."""
-    if vault_id in _vault_managers:
-        del _vault_managers[vault_id]
-        if vault_id in _vault_metadata:
-            del _vault_metadata[vault_id]
-        _save_metadata()
+    deleted = (
+        db.query(Vault)
+        .filter(Vault.id == vault_id, Vault.user_id == owner_id)
+        .delete()
+    )
+    if deleted:
+        db.commit()
+        _vault_managers.pop(vault_id, None)
         return True
     return False
 
 
-def _save_metadata() -> None:
-    """Save vault metadata to disk."""
-    metadata_path = Path(settings.vaults_metadata_path)
-    try:
-        with open(metadata_path, 'w', encoding='utf-8') as f:
-            json.dump(_vault_metadata, f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        print(f"Failed to save vault metadata: {e}")
-
-
-def _load_metadata() -> None:
-    """Load vault metadata from disk."""
-    metadata_path = Path(settings.vaults_metadata_path)
-    if not metadata_path.exists():
-        return
-
-    try:
-        with open(metadata_path, 'r', encoding='utf-8') as f:
-            loaded = json.load(f)
-            _vault_metadata.update(loaded)
-    except Exception as e:
-        print(f"Failed to load vault metadata: {e}")
-
-
-def restore_vaults_from_metadata() -> None:
+def restore_vaults_from_metadata(db: Session) -> None:
     """
     Restore vault managers from saved metadata.
     Called on application startup.
     """
-    _load_metadata()
-
-    for vault_id, metadata in _vault_metadata.items():
+    vaults = db.query(Vault).all()
+    for vault in vaults:
         try:
-            # Recreate vault manager
-            manager = create_vault_manager(vault_id)
-            print(f"Restored vault {vault_id}: {metadata.get('name', 'Unknown')} ({metadata.get('notes_count', 0)} notes)")
+            create_vault_manager(vault.id)
+            print(f"Restored vault {vault.id}: {vault.name} ({vault.notes_count or 0} notes)")
         except Exception as e:
-            print(f"Failed to restore vault {vault_id}: {e}")
+            print(f"Failed to restore vault {vault.id}: {e}")
