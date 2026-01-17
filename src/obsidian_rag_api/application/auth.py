@@ -85,13 +85,8 @@ async def exchange_code_for_user(code: str, state: str, db: Session) -> tuple[Us
         raise HTTPException(status_code=400, detail="Google user info missing sub")
 
     user = db.query(User).filter(User.google_sub == google_sub).first()
+    has_admin = db.query(User).filter(User.is_admin.is_(True)).count() > 0
     if user is None:
-        has_admin = (
-            db.query(User)
-            .filter(User.is_demo.is_(False))
-            .count()
-            > 0
-        )
         user = User(
             google_sub=google_sub,
             email=userinfo.get("email"),
@@ -105,6 +100,8 @@ async def exchange_code_for_user(code: str, state: str, db: Session) -> tuple[Us
         user.email = userinfo.get("email")
         user.name = userinfo.get("name")
         user.avatar_url = userinfo.get("picture")
+        if not user.is_admin and not has_admin:
+            user.is_admin = True
 
     db.commit()
     return user, record.redirect_uri
